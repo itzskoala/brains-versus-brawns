@@ -29,6 +29,10 @@ ufc-elo/
 └── README.md
 ```
 
+## Data Pipeline
+
+`src/data/cleaning.py` cleans the raw fight- and round-level CSVs (missing values, dtypes), `src/data/splitting.py` splits fights chronologically for training, and `src/features/engineering.py` builds leakage-safe matchup and fighter-history features - everything is computed from data known before the fight being predicted. EDA lives in `notebooks/` (`eda.ipynb`, `univariate_questions.ipynb`, `bivariate_questions.ipynb`, `multivariate_questions.ipynb`), including a documented red-corner recording bias in the source data that any model built on this dataset needs to account for.
+
 ## Setup
 
 ```bash
