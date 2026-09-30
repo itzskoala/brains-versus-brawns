@@ -112,3 +112,24 @@ def add_early_pace_features(fights_df, rounds_df):
     fights_df = fights_df.merge(b_history, on=["fight_id", "b_fighter_id"], how="left")
 
     return fights_df
+
+
+def engineer_fold_features(train, test, rounds=None):
+    """Build matchup, fighter-history, and (if rounds is given) early-pace
+    features for one walk-forward fold. train and test are concatenated
+    before engineering so that a fighter's history/pace features - for
+    their fights in test as well as train - are computed from fights up
+    through this fold's test period only, never from a later fold. Returns
+    (train, test) with the same rows as the inputs, features attached."""
+    fold = pd.concat([train, test])
+
+    fold = add_matchup_features(fold)
+    fold = add_fighter_history_features(fold)
+    if rounds is not None:
+        fold = add_early_pace_features(fold, rounds)
+
+    train_ids = set(train["fight_id"])
+    train_out = fold[fold["fight_id"].isin(train_ids)]
+    test_out = fold[~fold["fight_id"].isin(train_ids)]
+
+    return train_out, test_out
