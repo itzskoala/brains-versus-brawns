@@ -1,5 +1,7 @@
 # UFC Elo
 
+<img width="1220" height="813" alt="image" src="https://github.com/user-attachments/assets/86f80b88-62ed-4fc2-803c-18ed9a5194f0" />
+
 Machine learning project for modeling UFC fight outcomes with Elo-based ratings.
 
 Project scope, requirements, and deliverables are defined in [`docs/scoping.md`](docs/scoping.md).
