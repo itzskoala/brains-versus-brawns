@@ -44,6 +44,10 @@ pip install -r requirements.txt
 cp .env.example .env
 ```
 
+## Models
+
+`src/models/` has three walk-forward-validated baselines - logistic regression, random forest, and XGBoost - sharing the same leakage-safe feature set and corner-symmetrization. `src/evaluation/nested_validation.py` adds nested walk-forward hyperparameter tuning, and `src/models/persistence.py` saves fitted artifacts to `models/`. See `docs/results.md` for current evaluation numbers (accuracy, log loss, ROC-AUC).
+
 ## Testing
 
 ```bash

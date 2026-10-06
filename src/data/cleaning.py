@@ -1,5 +1,28 @@
 import pandas as pd
 
+# Slugified 1:1 mapping of the 11 raw `method` values - used both as a
+# feature (a fighter's historical finish tendency, including how often they
+# win a close split/majority decision vs. a clear unanimous one) and as a
+# future prediction target. Every genuine outcome keeps its own category,
+# including the rare ones (DQ, doctor stoppage, overturned, could-not-
+# continue) - none of them are impossible or data errors, so none are
+# collapsed into a generic "other".
+METHOD_LABEL_MAP = {
+    "KO/TKO": "ko_tko",
+    "TKO - Doctor's Stoppage": "tko_doctor_stoppage",
+    "Submission": "submission",
+    "Decision - Unanimous": "decision_unanimous",
+    "Decision - Split": "decision_split",
+    "Decision - Majority": "decision_majority",
+    "Decision": "decision_unspecified",
+    "Overturned": "overturned",
+    "Could Not Continue": "could_not_continue",
+    "DQ": "dq",
+    "Other": "other",
+}
+METHOD_LABELS = sorted(set(METHOD_LABEL_MAP.values()))
+DECISION_LABELS = {"decision_unanimous", "decision_split", "decision_majority", "decision_unspecified"}
+
 
 def clean_fights(df):
     """Clean the fight-level dataset (master.csv). Returns a new DataFrame."""
@@ -46,6 +69,9 @@ def clean_fights(df):
 
     # title_fight is a 0/1 flag, not a count - store as bool.
     df["title_fight"] = df["title_fight"].astype(bool)
+
+    # coarse finish-type grouping - see METHOD_LABEL_MAP.
+    df["method_label"] = df["method"].map(METHOD_LABEL_MAP).astype("category")
 
     # low-cardinality text fields - store as category, not free-form object.
     for col in ["weight_class", "result_status", "method", "time_format",

@@ -1,0 +1,30 @@
+{
+  "model_name": "random_forest",
+  "feature_columns": [
+    "age_diff",
+    "experience_diff",
+    "prior_win_rate_diff",
+    "win_streak_diff",
+    "loss_streak_diff",
+    "form_last5_win_rate_diff",
+    "reach_diff_x_flyweight",
+    "reach_diff_x_bantamweight",
+    "reach_diff_x_featherweight",
+    "reach_diff_x_lightweight",
+    "reach_diff_x_welterweight",
+    "reach_diff_x_middleweight",
+    "reach_diff_x_light_heavyweight",
+    "reach_diff_x_heavyweight"
+  ],
+  "params": {
+    "n_estimators": 200,
+    "max_depth": 6
+  },
+  "metrics": {
+    "mean_accuracy": 0.6194,
+    "mean_log_loss": 0.6493,
+    "mean_roc_auc": 0.6664,
+    "source": "nested walk-forward, baseline(14) feature set, 2026-10-06"
+  },
+  "saved_at": "2026-10-06T21:16:49.979760+00:00"
+}

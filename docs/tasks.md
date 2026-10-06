@@ -34,13 +34,15 @@ Tasks should be completed incrementally. Do not implement future tasks premature
 
 # Phase 3 — Feature Engineering
 
-* [ ] Identify useful features from the available dataset
-* [ ] Implement fighter-level features
-* [ ] Implement matchup-level features
-* [ ] Implement historical/rolling features where required
-* [ ] Implement shared feature transformations
-* [ ] Add feature validation tests
-* [ ] Document important feature decisions
+* [x] Identify useful features from the available dataset
+* [x] Implement fighter-level features
+* [x] Implement matchup-level features
+* [x] Implement historical/rolling features where required
+* [x] Implement shared feature transformations
+* [x] Add feature validation tests
+* [x] Document important feature decisions
+* [x] Run ablation on the new candidate groups (career_volume_stats, career_style_stats, finish_tendency, stance_mismatch; recent_form was already in `FEATURE_COLUMNS`) and promote whichever help into `logistic_regression.py FEATURE_COLUMNS` - done 2026-10-06, see `results.md`: promoted career_volume_stats, career_style_stats, stance_mismatch; left out finish_tendency (hurt logistic regression, flat-to-mixed elsewhere)
+* [x] Resolve `stance_mismatch` vs. `_symmetrize`'s antisymmetric-diff assumption before adding it to `CANDIDATE_FEATURES` - done 2026-10-06: added `SYMMETRIC_FEATURE_COLUMNS` to `logistic_regression.py`, `_symmetrize` now only negates antisymmetric columns
 
 ---
 
@@ -59,21 +61,22 @@ Tasks should be completed incrementally. Do not implement future tasks premature
 
 # Phase 5 — Baseline Model
 
-* [ ] Establish a simple prediction baseline
-* [ ] Create the training pipeline
-* [ ] Train an initial ML model
-* [ ] Establish evaluation metrics
-* [ ] Save model artifacts appropriately
-* [ ] Record baseline results in `results.md`
+* [x] Establish a simple prediction baseline - logistic regression, `src/models/logistic_regression.py`
+* [x] Create the training pipeline - `run_backtest` (walk-forward) + `src/evaluation/nested_validation.py` (nested walk-forward tuning)
+* [x] Train an initial ML model
+* [x] Establish evaluation metrics - accuracy, log loss, ROC-AUC (2026-10-06)
+* [x] Save model artifacts appropriately - `src/models/persistence.py`, one `.joblib`+`.json` per model in `models/` (2026-10-06) - built from the best-*known*, not best-possible, config; see follow-up below
+* [x] Record baseline results in `results.md`
 
 ---
 
 # Phase 6 — Model Development
 
-* [ ] Test additional model types
-* [ ] Compare feature sets
+* [x] Test additional model types - random forest, XGBoost
+* [x] Compare feature sets - 14-feature baseline vs. 39-feature expanded set (2026-10-06)
 * [ ] Experiment with Elo + ML
-* [ ] Tune important hyperparameters where justified
+* [x] Tune important hyperparameters where justified - nested walk-forward tuning implemented and run for logistic regression (both feature sets) and random forest (baseline only)
+* [ ] **Follow-up: complete the baseline-vs-expanded x untuned-vs-tuned matrix** - stopped early 2026-10-06 (random forest's nested tuning took ~16 min/cell). Still need: random_forest (expanded, tuned), xgboost_model (baseline, tuned), xgboost_model (expanded, tuned). The three saved artifacts in `models/` are the best *known* config per model, not confirmed best overall - rerun and resave if these cells change the picture.
 * [ ] Compare experiments consistently
 * [ ] Analyze model errors
 * [ ] Perform relevant slice analysis
