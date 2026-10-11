@@ -51,14 +51,12 @@ def _native(value):
         return [_native(v) for v in value]
     if isinstance(value, (np.integer,)):
         return int(value)
-    if isinstance(value, (np.floating,)):
-        return float(value)
+    if isinstance(value, (np.floating, float)):
+        return None if pd.isna(value) else float(value)
     if isinstance(value, (np.bool_,)):
         return bool(value)
     if isinstance(value, pd.Timestamp):
         return value.date().isoformat()
-    if isinstance(value, float) and pd.isna(value):
-        return None
     return value
 
 
