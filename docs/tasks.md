@@ -27,6 +27,7 @@ Tasks should be completed incrementally. Do not implement future tasks premature
 * [ ] Handle required cleaning/transformation
 * [ ] Establish consistent fighter identity handling
 * [ ] Implement appropriate dataset splitting
+* [ ] **Follow-up: reconcile `split_fights` with the walk-forward approach.** `src/data/splitting.py split_fights` (one-shot chronological 70/15/15 train/val/test) predates `walk_forward_splits` and is now only used in `notebooks/eda.ipynb` and its own test - no model (`src/models/*.py`) uses it, they all use `walk_forward_splits` instead. Come back and either update `eda.ipynb` to reflect the walk-forward split actually used for modeling, or otherwise reconcile/remove `split_fights` once this phase is revisited.
 * [ ] Add tests for data validation
 * [ ] Verify the resulting dataset
 
@@ -87,7 +88,7 @@ Tasks should be completed incrementally. Do not implement future tasks premature
 # Phase 7 — Evaluation
 
 * [ ] Establish final evaluation methodology
-* [ ] Run final model comparisons
+* [x] Run final model comparisons - winner target only: `src/evaluation/train_predict_evaluate.py` runs all three production models' walk-forward backtest side by side, saves per-fold predictions/metrics/summary + comparison charts under `docs/` (2026-10-10, see `results.md`). Multi-target prediction (method of victory, strikes, takedowns, control time, etc.) deliberately deferred.
 * [ ] Evaluate probability quality where applicable
 * [ ] Perform error analysis
 * [ ] Investigate unexpected results
@@ -100,13 +101,15 @@ Tasks should be completed incrementally. Do not implement future tasks premature
 
 Only complete this phase if required by `scope.md`.
 
-* [ ] Define prediction API
-* [ ] Implement model loading
-* [ ] Implement request validation
-* [ ] Implement feature preparation
-* [ ] Implement prediction endpoint
-* [ ] Add API tests
-* [ ] Verify training/serving feature consistency
+* [x] Define prediction API - `api/main.py` (FastAPI): `/divisions`, `/models`, `/fighters?division=`, `POST /predict`
+* [x] Implement model loading - all three saved artifacts loaded once at startup via `src/models/persistence.load_model_artifact`
+* [x] Implement request validation - Pydantic `PredictRequest`; unknown model/fighter/pre-debut year all return 400 with a message (2026-10-08)
+* [x] Implement feature preparation - `src/features/snapshot.py` (new): point-in-time fighter snapshots via a synthetic "phantom fight" row through the unmodified `engineer_fold_features`, then `build_matchup_features` assembles exactly whichever model's own `feature_columns` calls for (2026-10-08)
+* [x] Implement prediction endpoint - `POST /predict`, see above
+* [x] Add API tests - `tests/test_api.py`, `tests/test_snapshot.py`
+* [x] Verify training/serving feature consistency - snapshot feature formulas cross-checked against `src/features/engineering.py`/`src/models/logistic_regression.py` directly (see commit); `test_build_fighter_snapshot_is_inclusive_of_a_real_fight_on_the_cutoff_date` pins the exact semantics
+
+Known gaps carried forward, not blocking: `models/random_forest.json` was saved with the stale 14-feature baseline (not the current 39-feature `FEATURE_COLUMNS` - see Phase 6 follow-up above); the API reads each model's own saved `feature_columns` generically so this doesn't break anything, it's just a smaller feature set for that one model until it's retrained. Saved artifacts also emit sklearn/xgboost version-mismatch warnings (pickled with older library versions) - functional today, worth re-saving next time models are retrained.
 
 ---
 
@@ -114,12 +117,14 @@ Only complete this phase if required by `scope.md`.
 
 Only complete this phase if required by `scope.md`.
 
-* [ ] Define required UI
-* [ ] Connect frontend to API
-* [ ] Implement prediction flow
-* [ ] Display relevant prediction information
-* [ ] Handle loading and error states
-* [ ] Test frontend/API integration
+* [x] Define required UI - Gradio: model + division dropdowns, a fighter + optional "year" dropdown per corner, Predict button, per-corner stats panel, past-meetings history (2026-10-08)
+* [x] Connect frontend to API - `frontend/gradio.py` calls `api/main.py` over HTTP only, no model/feature logic in the frontend (per `docs/proposal.md`)
+* [x] Implement prediction flow - division/fighter dropdowns cascade (division limits fighter choices, fighter selection populates that fighter's real fight years); Predict calls `POST /predict`
+* [x] Display relevant prediction information - win probabilities, full striking/grappling/physical/fight-pace stats panel per corner, and (when the two fighters have already met) a predicted-vs-actual card per past meeting including rematches
+* [x] Handle loading and error states - API 400s (unknown model, fighter with no data by the chosen year) surface as an inline error message instead of a crash
+* [ ] Test frontend/API integration - verified manually end-to-end (uvicorn + gradio, several real matchups incl. a rematch and a same-model corner-swap symmetry check) and via `tests/test_api.py`; no browser/UI-level automated test yet
+
+Note: `frontend/gradio.py` is literally named the same as the `gradio` package, which self-shadows `import gradio` when run as `python frontend/gradio.py` directly (the script's own directory lands first on `sys.path`). Run it as `python -m frontend.gradio` from the project root instead (needs `frontend/__init__.py`, added 2026-10-08).
 
 ---
 

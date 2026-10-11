@@ -90,48 +90,27 @@ Metric: Value
 
 Track important model results here.
 
-| Model                                    | Features                       | Mean Accuracy | Mean Log Loss | Mean ROC-AUC | Notes                                                        |
-| ----------------------------------------- | ------------------------------- | -------------: | -------------: | -------------: | ------------------------------------------------------------- |
-| Logistic regression (`logistic_regression.py`) | 14 (`FEATURE_COLUMNS`)     |         0.6195 |         0.6563 |         0.6639 | Current selected baseline, re-run 2026-10-06 via `run_backtest` with ROC-AUC now tracked; numbers match the prior accuracy/log_loss run exactly (reproducible, same 24 walk-forward folds 2003-2026). Early folds (2003-2008) show `RuntimeWarning: overflow in matmul` from unregularized/small-fold instability - known issue, not yet resolved. |
-| Random forest (`random_forest.py`)       | same 14 (`FEATURE_COLUMNS`)      |         0.5997 |         0.7101 |         0.6387 | Worse than logistic regression on all three metrics - too few/too linear features for a tree to gain from |
-| Random forest (`random_forest.py`)       | ~90 (full `ALL_CANDIDATE_COLUMNS`) |         0.6164 |         0.6539 |              — | Better than 14-feature random forest, still 0.31pp below logistic regression on accuracy - see Feature Findings below. ROC-AUC not yet computed for this run. |
-| XGBoost (`xgboost_model.py`)             | same 14 (`FEATURE_COLUMNS`)      |         0.6146 |         0.6533 |         0.6632 | Slightly below logistic regression on accuracy, slightly better log_loss, slightly below on ROC-AUC |
-| **XGBoost (`xgboost_model.py`)**         | **~90 (full `ALL_CANDIDATE_COLUMNS`)** |     **0.6225** |     **0.6468** |              — | **Best of every model/feature combination tried so far on accuracy/log_loss** (2026-10-06). ROC-AUC not yet computed for this run. |
-| Logistic regression, **nested walk-forward** (`src/evaluation/nested_validation.py`) | 14 (`FEATURE_COLUMNS`) | 0.6194 | 0.6495 | — | Per-outer-fold `C` tuned on an inner walk-forward within that fold's own training window only (2026-10-06); consistently chose `C=0.01` every fold. Accuracy ~unchanged vs. fixed `C=1.0`, log_loss improved (0.6563 -> 0.6495) - the fixed C=1.0 was mildly under-regularized. ROC-AUC not yet computed for this run. |
-| Random forest, **nested walk-forward** (`src/evaluation/nested_validation.py`) | ~90 (full `ALL_CANDIDATE_COLUMNS`) | 0.6221 | 0.6536 | — | Per-outer-fold `n_estimators`/`max_depth` tuned on an inner walk-forward within that fold's own training window only (2026-10-06), grid `{100,200} x {3,6,None}`. `max_depth=None` (the fixed run's default) was **never** chosen by inner validation in any of the 24 outer folds - `max_depth=6` won 18/24 folds, `max_depth=3` the other 6, split roughly evenly between `n_estimators` 100/200. Accuracy improved from the fixed-hyperparameter full-pool run (0.6164 -> 0.6221, now best-of-all on accuracy), log_loss about flat (0.6539 -> 0.6536). ROC-AUC not yet computed for this run. |
-| XGBoost, **nested walk-forward** (`src/evaluation/nested_validation.py`) | ~90 (full `ALL_CANDIDATE_COLUMNS`) | 0.6214 | 0.6439 | — | Per-outer-fold `n_estimators`/`max_depth`/`learning_rate` tuned on an inner walk-forward within that fold's own training window only (2026-10-06), grid `{100,200} x {3,5} x {0.05,0.1}`. Mostly chose `max_depth=3, learning_rate=0.05` (shallower/slower-learning than the fixed run's defaults). Accuracy slightly below the fixed-hyperparameter full-pool run (0.6225 -> 0.6214) but log_loss improved to the best of every run so far (0.6468 -> 0.6439) - better-calibrated probabilities from the tuned, more conservative trees. ROC-AUC not yet computed for this run. |
+| Model                                    | Features                       | Mean Accuracy | Mean Log Loss | Mean ROC-AUC | Mean MSE | Notes                                                        |
+| ----------------------------------------- | ------------------------------- | -------------: | -------------: | -------------: | -------: | ------------------------------------------------------------- |
+| Logistic regression (`logistic_regression.py`) | 14 (`FEATURE_COLUMNS`)     |         0.6195 |         0.6563 |         0.6639 | — | Current selected baseline, re-run 2026-10-06 via `run_backtest` with ROC-AUC now tracked; numbers match the prior accuracy/log_loss run exactly (reproducible, same 24 walk-forward folds 2003-2026). Early folds (2003-2008) show `RuntimeWarning: overflow in matmul` from unregularized/small-fold instability - known issue, not yet resolved. |
+| Random forest (`random_forest.py`)       | same 14 (`FEATURE_COLUMNS`)      |         0.5997 |         0.7101 |         0.6387 | — | Worse than logistic regression on all three metrics - too few/too linear features for a tree to gain from |
+| Random forest (`random_forest.py`)       | ~90 (full `ALL_CANDIDATE_COLUMNS`) |         0.6164 |         0.6539 |              — | — | Better than 14-feature random forest, still 0.31pp below logistic regression on accuracy - see Feature Findings below. ROC-AUC not yet computed for this run. |
+| XGBoost (`xgboost_model.py`)             | same 14 (`FEATURE_COLUMNS`)      |         0.6146 |         0.6533 |         0.6632 | — | Slightly below logistic regression on accuracy, slightly better log_loss, slightly below on ROC-AUC |
+| **XGBoost (`xgboost_model.py`)**         | **~90 (full `ALL_CANDIDATE_COLUMNS`)** |     **0.6225** |     **0.6468** |              — | — | **Best of every model/feature combination tried so far on accuracy/log_loss** (2026-10-06). ROC-AUC not yet computed for this run. |
+| Logistic regression, **nested walk-forward** (`src/evaluation/nested_validation.py`) | 14 (`FEATURE_COLUMNS`) | 0.6194 | 0.6495 | — | — | Per-outer-fold `C` tuned on an inner walk-forward within that fold's own training window only (2026-10-06); consistently chose `C=0.01` every fold. Accuracy ~unchanged vs. fixed `C=1.0`, log_loss improved (0.6563 -> 0.6495) - the fixed C=1.0 was mildly under-regularized. ROC-AUC not yet computed for this run. |
+| Random forest, **nested walk-forward** (`src/evaluation/nested_validation.py`) | ~90 (full `ALL_CANDIDATE_COLUMNS`) | 0.6221 | 0.6536 | — | — | Per-outer-fold `n_estimators`/`max_depth` tuned on an inner walk-forward within that fold's own training window only (2026-10-06), grid `{100,200} x {3,6,None}`. `max_depth=None` (the fixed run's default) was **never** chosen by inner validation in any of the 24 outer folds - `max_depth=6` won 18/24 folds, `max_depth=3` the other 6, split roughly evenly between `n_estimators` 100/200. Accuracy improved from the fixed-hyperparameter full-pool run (0.6164 -> 0.6221, now best-of-all on accuracy), log_loss about flat (0.6539 -> 0.6536). ROC-AUC not yet computed for this run. |
+| XGBoost, **nested walk-forward** (`src/evaluation/nested_validation.py`) | ~90 (full `ALL_CANDIDATE_COLUMNS`) | 0.6214 | 0.6439 | — | — | Per-outer-fold `n_estimators`/`max_depth`/`learning_rate` tuned on an inner walk-forward within that fold's own training window only (2026-10-06), grid `{100,200} x {3,5} x {0.05,0.1}`. Mostly chose `max_depth=3, learning_rate=0.05` (shallower/slower-learning than the fixed run's defaults). Accuracy slightly below the fixed-hyperparameter full-pool run (0.6225 -> 0.6214) but log_loss improved to the best of every run so far (0.6468 -> 0.6439) - better-calibrated probabilities from the tuned, more conservative trees. ROC-AUC not yet computed for this run. |
+| Logistic regression (`logistic_regression.py`) | current `FEATURE_COLUMNS` (14 baseline + promoted `career_volume_stats`/`career_style_stats`/`stance_mismatch`) | 0.6200 | 0.6604 | 0.6643 | **0.2298** | 2026-10-08, after `mean_squared_error` added to `run_backtest`. Target variance (see note below) is 0.2500 every fold - beats the mean-prediction baseline on 23/24 folds. |
+| Random forest (`random_forest.py`) | same current `FEATURE_COLUMNS` | 0.6140 | 0.6793 | 0.6538 | **0.2345** | 2026-10-08. Weakest of the three on every metric including MSE; beats the mean-prediction baseline on only 19/24 folds (the other two models beat it on 23/24) - the 5 losing folds are mostly the earliest, smallest-training-data years. |
+| **XGBoost (`xgboost_model.py`)** | **same current `FEATURE_COLUMNS`** | **0.6286** | **0.6421** | **0.6748** | **0.2253** | **Best of the three on every metric including MSE** (2026-10-08). Beats the mean-prediction baseline on 23/24 folds. |
 
 All three nested walk-forward runs are complete as of 2026-10-06.
 
-**Baseline re-confirmed 2026-10-06** with ROC-AUC added to `src/models/*.py` and `src/evaluation/nested_validation.py` (`roc_auc_score` on predicted probabilities). This is the "exact baseline" the feature-ablation and nested-validation comparison work below is measured against: 14 features (`age_diff`, `experience_diff`, `prior_win_rate_diff`, `win_streak_diff`, `loss_streak_diff`, `form_last5_win_rate_diff`, `reach_diff_x_<division>` x8), default hyperparameters (`C=1.0` / `n_estimators=200,max_depth=None` / `n_estimators=200,max_depth=3,learning_rate=0.1`), unchanged walk-forward splitting/preprocessing.
+**Baseline re-confirmed 2026-10-06** with ROC-AUC added to `src/models/*.py` and `src/evaluation/nested_validation.py` (`roc_auc_score` on predicted probabilities). This is the "exact baseline" the pending feature-ablation and nested-validation comparison work below is measured against: 14 features (`age_diff`, `experience_diff`, `prior_win_rate_diff`, `win_streak_diff`, `loss_streak_diff`, `form_last5_win_rate_diff`, `reach_diff_x_<division>` x8), default hyperparameters (`C=1.0` / `n_estimators=200,max_depth=None` / `n_estimators=200,max_depth=3,learning_rate=0.1`), unchanged walk-forward splitting/preprocessing.
 
-### baseline (14) vs. expanded (39) x untuned vs. tuned (2026-10-06)
+**MSE and target-variance tracking added 2026-10-08** to all three `run_backtest` functions and to `src/evaluation/nested_validation.py`'s shared `_fit_and_score`/`select_hyperparameters` (new `mse`, `target_variance`, and `beats_mean_baseline` fields; `target_variance = y_test.var(ddof=0)`, i.e. exactly the MSE of a model that always predicts the mean of `y_test` - the standard "is this model even better than guessing the average" rule of thumb). `mse` here is the Brier score (MSE between predicted win-probability and the actual 0/1 outcome), matching the `Brier Score` row already reserved in the Final Results table below.
 
-After promoting `career_volume_stats`/`career_style_stats`/`stance_mismatch` into `FEATURE_COLUMNS` (see Feature Findings), ran the 2x2x3 comparison: `BASELINE_FEATURE_COLUMNS` (14, pre-promotion) vs. `FEATURE_COLUMNS` (39, post-promotion) x fixed default hyperparameters (`run_backtest`) vs. per-outer-fold nested-tuned (`run_nested_backtest`, each model's own `PARAM_GRID`), for all three models. **Stopped early by request after 3 of 6 cells** - random forest's nested tuning took ~16 minutes for one cell (grid x inner-fold x outer-fold refits add up fast), so random forest (expanded, tuned) and both XGBoost (tuned) cells were not run.
-
-| Model | Features | Tuning | Accuracy | Log Loss | ROC-AUC |
-| --- | --- | --- | ---: | ---: | ---: |
-| logistic_regression | baseline (14) | untuned | 0.6195 | 0.6563 | 0.6639 |
-| logistic_regression | baseline (14) | tuned | 0.6194 | 0.6495 | 0.6645 |
-| logistic_regression | expanded (39) | untuned | 0.6200 | 0.6604 | 0.6643 |
-| logistic_regression | expanded (39) | tuned | 0.6204 | 0.6533 | 0.6656 |
-| random_forest | baseline (14) | untuned | 0.5997 | 0.7101 | 0.6387 |
-| random_forest | baseline (14) | tuned | 0.6194 | 0.6493 | 0.6664 |
-| random_forest | expanded (39) | untuned | 0.6135 | 0.6793 | 0.6538 |
-| random_forest | expanded (39) | tuned | — not run — | — | — |
-| xgboost_model | baseline (14) | untuned | 0.6146 | 0.6533 | 0.6632 |
-| xgboost_model | baseline (14) | tuned | — not run — | — | — |
-| xgboost_model | expanded (39) | untuned | 0.6265 | 0.6421 | 0.6740 |
-| xgboost_model | expanded (39) | tuned | — not run — | — | — |
-
-**Observations on the completed cells:** tuning helped logistic regression modestly (lower log_loss, slightly higher ROC-AUC, accuracy flat) on both feature sets. Tuning helped random forest *enormously* on the baseline feature set - `max_depth=None` (its hardcoded default) was badly overfitting; nested tuning picked a shallower tree per fold and accuracy jumped from 0.5997 to 0.6194, log_loss from 0.7101 to 0.6493, now competitive with logistic regression. The expanded feature set helped every model that was tested on it untuned (clearest for XGBoost: 0.6146 -> 0.6265 accuracy, 0.6533 -> 0.6421 log_loss).
-
-**Best known config per model (incomplete comparison - see gaps above):**
-* **logistic_regression: expanded (39), tuned** - best accuracy (0.6204) and ROC-AUC (0.6656) of its 4 cells; log_loss (0.6533) is close to but not quite baseline-tuned's 0.6495.
-* **random_forest: baseline (14), tuned** - best of its 3 completed cells on all three metrics; expanded+tuned was never run, so this is not confirmed as random forest's true best, just its best *known* configuration.
-* **xgboost_model: expanded (39), untuned** - best of its 2 completed cells on all three metrics; no tuned run exists for XGBoost at all, so tuning might still improve on this.
-
-**Follow-up (recorded in `tasks.md`):** run the 3 missing cells (random_forest expanded+tuned, xgboost_model baseline+tuned, xgboost_model expanded+tuned) to complete the matrix before treating any "best config" above as final.
+**Target variance is exactly 0.2500 in every single walk-forward fold, with no exceptions** - confirmed directly across all 24 folds (2003-2026). This is mechanical, not a modeling result: `_symmetrize` (`src/models/logistic_regression.py`) mirrors every fight into a red-perspective row and a blue-perspective row, so every fold's test set contains exactly one win-row and one loss-row per fight. That forces `mean(y_test) = 0.5` and `var(y_test) = p(1-p) = 0.25` by construction, regardless of era or fold size. This is the symmetrized-label counterpart to the raw-label "always predict red" baseline already documented above (red wins 67.6% overall / ~100% pre-2010) - same underlying corner-labeling artifact, just restated on the corner-agnostic label the models are actually trained on. Practical consequence: "MSE vs. target variance" collapses to "MSE vs. 0.25" for every fold in this project, so there's no need to recompute target variance per fold going forward - a model whose MSE exceeds 0.25 on a given fold is worse than a coin flip on that fold.
 
 ---
 
@@ -256,6 +235,26 @@ Record recommendations made during development.
 
 Record decisions that affect the architecture or implementation.
 
+## Decision — `src/evaluation/train_predict_evaluate.py`: Train/Predict/Evaluate driver for the winner target
+
+**Decision:** Added `src/evaluation/train_predict_evaluate.py`, which runs all three production models' existing `run_backtest` (expanding-window yearly walk-forward, `src/data/splitting.walk_forward_splits`; train-only imputation/scaling via `src/features/imputation.py`/`src/features/scaling.py` - all unchanged) side by side and saves the results under `docs/`: `winner_predictions.csv` (every test-fold row's period/fight_id/y_true/y_pred/y_prob), `winner_metrics_by_fold.csv` (per-fold accuracy/log_loss/roc_auc/mse/target_variance/beats_mean_baseline), `winner_metrics_summary.csv` (mean of those across folds per model), and two comparison charts (`winner_accuracy_by_fold.png`, `winner_model_comparison.png`). Each `run_backtest` gained a backward-compatible `return_predictions=False` keyword - when `True` it also returns the per-row predictions it already computes internally but previously discarded; every existing caller (`persistence.py`, `feature_selection.py`, `representation_comparison.py`, `missing_value_comparison.py`, `migrate_to_three_files.py`, each model's own `__main__`) is unaffected since the default and return shape are unchanged.
+
+**Why:** `run_backtest` already did the real work (leakage-safe walk-forward, train-only preprocessing, accuracy/log-loss/ROC-AUC) for the winner target - nothing in the modeling, feature, or hyperparameter logic needed to change. What was missing was purely operational: nothing ran all three models together, nothing persisted predictions or metrics anywhere, and there was no comparison chart. This closes that gap without touching `FEATURE_COLUMNS`, any model's `PARAM_GRID`/hyperparameters, `_symmetrize`, or `clean_fights`/`clean_rounds`. Multi-target prediction (method of victory, strikes, takedowns, control time, etc.) was explicitly scoped out of this pass and deferred.
+
+**Results (full dataset, 24 yearly folds, 2003-2026):**
+
+| Model | Mean accuracy | Mean log loss | Mean ROC-AUC | Folds beating mean-baseline |
+|---|---:|---:|---:|---:|
+| Logistic Regression | 0.6246 | 0.6524 | 0.6732 | 23/24 |
+| Random Forest | 0.6255 | 0.6444 | 0.6698 | 23/24 |
+| XGBoost | 0.6348 | 0.6322 | 0.6867 | 23/24 |
+
+XGBoost is the best of the three on every metric, by a modest margin. All three comfortably beat the mean-prediction baseline in 23 of 24 folds (the one miss, 2019, is a bad fold for every model - log loss and ROC-AUC both dip there across the board, pointing at something about that year's fights rather than one model's weakness).
+
+**Alternatives considered:** duplicating the fold loop inside the new module instead of extending each `run_backtest` - rejected as the exact kind of duplicate logic CLAUDE.md warns against; the two loops would inevitably drift out of sync over time (e.g. a future change to the imputation/scaling step would need to be made twice).
+
+**Consequences:** `tests/test_train_predict_evaluate.py` added - a leakage test on the *full* `run_backtest` pipeline (spies on `fit_imputer`/`fit_scaler`, confirming neither ever sees a test-fold row, which the existing leakage tests for `walk_forward_splits`/`engineer_fold_features` alone didn't cover), an evaluation-correctness test (every fold's reported accuracy/log_loss/roc_auc recomputed independently from the returned predictions and compared exactly), a regression guard on `return_predictions=False`'s unchanged shape, and tests on the new module's orchestration/summary/file-saving. Full suite: 64/64 passing.
+
 ## Decision — Nested walk-forward validation for hyperparameter tuning
 
 **Decision:** Added `src/evaluation/nested_validation.py` (`select_hyperparameters`, `run_nested_backtest`), used by all three models via a small `build_model(**params)` + `PARAM_GRID` + `SCALE` contract added to each (`logistic_regression.py`, `random_forest.py`, `xgboost_model.py`). For each outer walk-forward fold, hyperparameters are chosen via an *inner* walk-forward confined entirely to that fold's own training window (the outer test year is never passed into selection), then a final model is trained on the full outer training window with the chosen hyperparameters and scored once on the outer test year.
@@ -277,24 +276,6 @@ Record decisions that affect the architecture or implementation.
 **Alternatives considered:** computing two separate corner-specific stance columns (`r_is_orthodox`, `b_is_orthodox`) and letting `_symmetrize`'s existing negation apply - rejected as more columns for no extra information, and it would reintroduce a different asymmetry (which column means "self" vs "opponent") that `_symmetrize` would still get wrong without a separate carve-out. The chosen fix generalizes to any future corner-symmetric feature by just adding it to `SYMMETRIC_FEATURE_COLUMNS`.
 
 **Consequences:** `_symmetrize`'s signature gained a `symmetric_columns` parameter with a module-level default, so every existing call site (`random_forest.py`, `xgboost_model.py`, `nested_validation.py`) picks up the fix automatically with no changes needed there. Verified with `tests/test_nested_validation.py` and the full `tests/` suite (14/14 passing) after the change. `stance_mismatch` was then ablated against the 14-feature baseline and promoted into `FEATURE_COLUMNS` - see Feature Findings above.
-
----
-
-## Decision — Model artifact persistence, saved from the best-known (incomplete) config per model
-
-**Decision:** Added `src/models/persistence.py` (`fit_final_model`, `save_model_artifact`, `load_model_artifact`). `fit_final_model` fits one model on the *entire* fights history (no held-out test fold - this is the deployable fit, not a backtest fold) using the same `engineer_fold_features`/`_symmetrize`/scaling pipeline as every backtest. `save_model_artifact` writes `models/<name>.joblib` (model + scaler) plus a sidecar `models/<name>.json` recording the feature list, hyperparameters, and the metrics it was selected with. Saved one artifact per model (2026-10-06), using the best-known cell from the baseline-vs-expanded x untuned-vs-tuned comparison above:
-
-| Artifact | Features | Params | Source cell |
-| --- | --- | --- | --- |
-| `models/logistic_regression.joblib` | expanded (39) | `C=0.01` (chosen by `select_hyperparameters` over the full dataset) | expanded, tuned |
-| `models/random_forest.joblib` | baseline (14) | `n_estimators=200, max_depth=6` (chosen by `select_hyperparameters` over the full dataset) | baseline, tuned |
-| `models/xgboost_model.joblib` | expanded (39) | `n_estimators=200, max_depth=3, learning_rate=0.1` (fixed default - this was the winning cell) | expanded, untuned |
-
-**Why:** Phase 5 (`tasks.md`) calls for saving model artifacts, and the project now has enough validated configurations to pick from. For the two "tuned" picks, a single final hyperparameter choice doesn't exist directly in a walk-forward backtest (every outer fold can choose differently) - `select_hyperparameters` was re-run once over the *entire* dataset (not per-fold) to get one concrete choice, which is the standard way to pick hyperparameters for a model about to be deployed on all available history.
-
-**Caveat - this is a best-*known*-not-best-possible pick.** The comparison matrix was stopped after 3 of 6 cells (see above) - `random_forest` (expanded, tuned) and both `xgboost_model` tuned cells were never run. If those turn out better, these artifacts should be regenerated. Treat these three as "good enough to unblock Phase 5/persistence," not as the final answer to "which config is best" - that needs the matrix completed first (tracked in `tasks.md`).
-
-**Consequences:** `models/*.joblib` and `models/*.json` are now real files on disk (not committed as sample data - should these be in `.gitignore` or tracked in git? not yet decided, see `tasks.md`). `joblib` added to `requirements.txt` (previously only a transitive dependency via scikit-learn, now imported directly).
 
 ---
 

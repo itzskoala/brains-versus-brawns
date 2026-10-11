@@ -6,3 +6,8 @@ joblib
 matplotlib
 pyyaml
 pytest
+fastapi
+uvicorn
+httpx
+gradio
+requests

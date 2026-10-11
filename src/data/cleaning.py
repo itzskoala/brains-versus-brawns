@@ -24,6 +24,16 @@ METHOD_LABELS = sorted(set(METHOD_LABEL_MAP.values()))
 DECISION_LABELS = {"decision_unanimous", "decision_split", "decision_majority", "decision_unspecified"}
 
 
+def parse_height_to_inches(series):
+    """Convert a height column stored as text like 5' 10" into inches.
+    Shared by clean_fights and src.features.snapshot, which both need to
+    turn fighter.csv's raw height string into the same numeric form."""
+    feet_inches = series.str.extract(r"(\d+)'\s*(\d+)")
+    feet = pd.to_numeric(feet_inches[0])
+    inches = pd.to_numeric(feet_inches[1])
+    return feet * 12 + inches
+
+
 def clean_fights(df):
     """Clean the fight-level dataset (master.csv). Returns a new DataFrame."""
     df = df.copy()
@@ -32,12 +42,8 @@ def clean_fights(df):
     # learn from these rows, so they are dropped rather than imputed.
     df = df[df["winner_id"].notna()]
 
-    # height is stored as text like 5' 10" - convert to inches.
     for col in ["r_height", "b_height"]:
-        feet_inches = df[col].str.extract(r"(\d+)'\s*(\d+)")
-        feet = pd.to_numeric(feet_inches[0])
-        inches = pd.to_numeric(feet_inches[1])
-        df[col] = feet * 12 + inches
+        df[col] = parse_height_to_inches(df[col])
 
     # physical attributes: missing at random, small share of rows - median impute.
     for col in ["r_height", "b_height", "r_weight_lbs", "b_weight_lbs",

@@ -67,26 +67,52 @@ _METHOD_LABELS_FOR_RATES = [m for m in METHOD_LABELS
 _VOLUME_STATS = [s for s in STAT_NAMES
                   if s not in ("sig_str_landed", "sig_str_atmp", "sig_str_landed_ground", "sig_str_atmp_ground")]
 
+# Each group below bundles its diff column(s) with the matching
+# self_<base>/opp_<base> individual columns (see
+# src.models.logistic_regression.PAIRED_BASES) wherever one is defined, so
+# ablating a group under the combined default (2026-10) removes that
+# underlying signal in BOTH representations, not just its diff half.
+# height_diff/reach_diff/weight_diff and finish_tendency have no
+# individual counterpart - they were never promoted into
+# DIFF_FEATURE_COLUMNS (docs/results.md), so PAIRED_BASES was never
+# extended to cover them; they stay diff-only exploratory candidates here,
+# independent of whatever FEATURE_COLUMNS currently is.
 CANDIDATE_FEATURES = {
     "height_diff": ["height_diff"],
     "reach_diff": ["reach_diff"],
     "weight_diff": ["weight_diff"],
-    "age_diff": ["age_diff"],
-    "experience_diff": ["experience_diff"],
-    "prior_win_rate_diff": ["prior_win_rate_diff"],
-    "reach_diff_x_division": [f"reach_diff_x_{d.lower().replace(' ', '_')}" for d in MAIN_DIVISIONS],
-    "career_volume_stats": [f"{stat}_per_min_diff" for stat in _VOLUME_STATS],
+    "age_diff": ["age_diff", "self_age", "opp_age"],
+    "experience_diff": ["experience_diff", "self_experience", "opp_experience"],
+    "prior_win_rate_diff": ["prior_win_rate_diff", "self_prior_win_rate", "opp_prior_win_rate"],
+    "reach_diff_x_division": (
+        [f"reach_diff_x_{d.lower().replace(' ', '_')}" for d in MAIN_DIVISIONS] +
+        [f"{side}_reach_inches_x_{d.lower().replace(' ', '_')}"
+         for d in MAIN_DIVISIONS for side in ("self", "opp")]
+    ),
+    "career_volume_stats": (
+        [f"{stat}_per_min_diff" for stat in _VOLUME_STATS] +
+        [f"{side}_{stat}_per_min" for stat in _VOLUME_STATS for side in ("self", "opp")]
+    ),
     "career_style_stats": [
         "career_sig_str_acc_diff", "career_td_acc_diff",
         "body_strike_share_diff", "leg_strike_share_diff",
         "clinch_strike_share_diff", "ground_strike_share_diff",
+    ] + [
+        f"{side}_{base}" for base in
+        ("career_sig_str_acc", "career_td_acc", "body_strike_share",
+         "leg_strike_share", "clinch_strike_share", "ground_strike_share")
+        for side in ("self", "opp")
     ],
     "finish_tendency": (
         [f"prior_{o}_rate_diff" for o in _METHOD_LABELS_FOR_RATES] +
         [f"prior_win_{o}_rate_diff" for o in _METHOD_LABELS_FOR_RATES] +
         ["avg_finish_round_prior_diff"]
     ),
-    "recent_form": ["win_streak_diff", "loss_streak_diff", "form_last5_win_rate_diff"],
+    "recent_form": (
+        ["win_streak_diff", "loss_streak_diff", "form_last5_win_rate_diff"] +
+        [f"{side}_{base}" for base in ("win_streak", "loss_streak", "form_last5_win_rate")
+         for side in ("self", "opp")]
+    ),
     "stance_mismatch": ["stance_mismatch"],
 }
 ALL_CANDIDATE_COLUMNS = [c for cols in CANDIDATE_FEATURES.values() for c in cols]
@@ -113,8 +139,9 @@ def run_ablation(fights, rounds=None):
 
 if __name__ == "__main__":
     from src.data.cleaning import clean_fights
+    from src.data.ingestion import build_master_equivalent, load_fighters, load_fights
 
-    master = pd.read_csv("data/master.csv")
+    master = build_master_equivalent(load_fights(), load_fighters())
     fights = clean_fights(master)
 
     print(run_ablation(fights).to_string(index=False))
