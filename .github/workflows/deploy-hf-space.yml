@@ -1,0 +1,44 @@
+name: Deploy to Hugging Face Space
+
+on:
+  push:
+    branches: [main]
+    paths-ignore:
+      - "docs/**"
+      - "notebooks/**"
+      - "tests/**"
+      - "*.md"
+  workflow_dispatch: {}
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install hf CLI
+        run: pip install -U "huggingface_hub[cli]"
+
+      - name: Stage Space files
+        run: |
+          set -e
+          mkdir -p space_build
+          cp deployment/app.py space_build/app.py
+          cp deployment/README.md space_build/README.md
+          cp requirements.txt space_build/requirements.txt
+          for d in src api frontend configs data models; do
+            mkdir -p "space_build/$d"
+            rsync -a --exclude='__pycache__' --exclude='*.pyc' "$d/" "space_build/$d/"
+          done
+
+      - name: Push to Hugging Face Space
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: |
+          hf upload holasoykoalo7/BrainsVSBrawn space_build \
+            --repo-type space \
+            --commit-message "Deploy from GitHub: ${{ github.sha }}"
