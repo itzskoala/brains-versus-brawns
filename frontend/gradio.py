@@ -122,14 +122,24 @@ def _format_meeting(meeting):
     predicted = meeting["predicted"]
     actual = meeting["actual"]
     winner_label = "Red" if actual["winner"] == "red" else "Blue"
-    predicted_label = "Red" if predicted["predicted_winner"] == "red" else "Blue"
-    agree = "✅ model agreed" if predicted["predicted_winner"] == actual["winner"] else "❌ model disagreed"
+
+    if predicted is None:
+        prediction_line = (
+            "Predicted (as of right before this fight): unavailable - one corner had no "
+            "fight history yet (likely their promotional debut).\n\n"
+        )
+    else:
+        predicted_label = "Red" if predicted["predicted_winner"] == "red" else "Blue"
+        agree = "✅ model agreed" if predicted["predicted_winner"] == actual["winner"] else "❌ model disagreed"
+        prediction_line = (
+            f"Predicted (as of right before this fight): **{predicted_label}** to win "
+            f"({predicted['red_win_probability'] * 100:.1f}% red / "
+            f"{predicted['blue_win_probability'] * 100:.1f}% blue) - {agree}\n\n"
+        )
 
     return (
         f"### {meeting['event_name']} ({meeting['event_date']})\n"
-        f"Predicted (as of right before this fight): **{predicted_label}** to win "
-        f"({predicted['red_win_probability'] * 100:.1f}% red / "
-        f"{predicted['blue_win_probability'] * 100:.1f}% blue) - {agree}\n\n"
+        f"{prediction_line}"
         f"Actual: **{winner_label}** won by {actual['method']} (round {actual['finish_round']})\n\n"
         f"Actual fight stats - Red: {actual['red']['sig_str_landed']} sig. str landed, "
         f"{actual['red']['td_success']} TD | Blue: {actual['blue']['sig_str_landed']} sig. str landed, "

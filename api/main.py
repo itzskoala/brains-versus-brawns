@@ -204,22 +204,26 @@ def predict(req: PredictRequest):
                                                  req.red_fighter_id, meeting_date, meeting_division)
             blue_pre_fight = build_display_stats(trimmed_fights, trimmed_features, fighters_df,
                                                   req.blue_fighter_id, meeting_date, meeting_division)
-        except ValueError:
-            # a fighter's very first-ever fight (no history to snapshot
-            # before it) - skip rather than error the whole request.
-            continue
-
-        history.append({
-            "fight_id": meeting["fight_id"],
-            "event_name": meeting["event_name"],
-            "event_date": meeting_date,
-            "predicted": {
+            predicted = {
                 "red_win_probability": historical_red_prob,
                 "blue_win_probability": 1 - historical_red_prob,
                 "predicted_winner": "red" if historical_red_prob >= 0.5 else "blue",
                 "red_stats": red_pre_fight,
                 "blue_stats": blue_pre_fight,
-            },
+            }
+        except ValueError:
+            # one side had no fight history before this meeting (e.g. it
+            # was their UFC debut) - no pre-fight snapshot to predict from,
+            # but the meeting itself is still real: show the actual result
+            # without a predicted-vs-actual comparison rather than hiding
+            # the meeting entirely.
+            predicted = None
+
+        history.append({
+            "fight_id": meeting["fight_id"],
+            "event_name": meeting["event_name"],
+            "event_date": meeting_date,
+            "predicted": predicted,
             "actual": {
                 "winner": "red" if meeting["winner_id"] == req.red_fighter_id else "blue",
                 "method": meeting["method"],
