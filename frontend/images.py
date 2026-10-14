@@ -26,12 +26,16 @@ tried in order:
    "mixed martial artist". A wrong photo is worse than no photo, so this
    skips rather than guesses when unsure.
 
-Every resolved URL (including a confirmed "no photo" from BOTH sources) is
-cached by fighter_id on disk at CACHE_FILE_PATH, not just in memory -
-loaded once at import and appended to on every new lookup, so a fighter is
-only ever looked up at most once per source, ever, across every future run
-and every user of this app, not just once per process. See
-get_fighter_image_url.
+Every CONFIRMED, LEGITIMATE image URL - and only that, never a miss and
+never a fallback avatar - is cached by fighter_id on disk at
+CACHE_FILE_PATH, not just in memory - loaded once at import and appended
+to on every new successful lookup, so a fighter with a real photo is only
+ever looked up once, ever, across every future run and every user of this
+app, not just once per process. A miss (no photo found, or any fetch
+failure - a timeout, a non-200, rate-limiting) is deliberately never
+cached, so it's simply retried on the next lookup rather than permanently
+locking a fighter out of ever getting their real photo because of one bad
+network moment. See get_fighter_image_url.
 
 Most fighters in this dataset (anyone who fought before UFC.com's current
 athlete-database era and has no Wikipedia page either) won't have a photo
@@ -230,15 +234,27 @@ def get_fighter_image_url(fighter_id, fighter_name, cache=None, fetch=fetch_figh
     the only entry point the UI should call. `cache` defaults to this
     module's disk-backed, process-wide dict (shared by every user of this
     running app, not per-session); tests inject their own in-memory dict
-    and pass persist=False. A fighter with no photo from either source is
-    cached as None too - we never re-request either site for them again,
-    this run or any future one."""
+    and pass persist=False.
+
+    Only a confirmed, legitimate image URL is ever cached - a miss (no
+    photo from either source, a timeout, a non-200, rate-limiting, any
+    failure at all) is NEVER written to the cache, deliberately. Caching a
+    miss would mean one bad network moment (confirmed to happen in
+    production - see frontend/images.py's module docstring) permanently
+    stamps a real fighter as "no photo", with no way to self-correct short
+    of someone manually editing the cache file. Leaving misses uncached
+    means they're simply retried on the next lookup - a small repeated
+    cost for fighters who truly have no photo anywhere, in exchange for
+    never getting permanently and silently stuck wrong for one who does."""
     cache = _image_url_cache if cache is None else cache
-    if fighter_id not in cache:
-        cache[fighter_id] = fetch(fighter_name)
+    if fighter_id in cache:
+        return cache[fighter_id]
+    image_url = fetch(fighter_name)
+    if image_url:
+        cache[fighter_id] = image_url
         if persist and cache is _image_url_cache:
             _save_cache_to_disk(cache)
-    return cache[fighter_id]
+    return image_url
 
 
 _AVATAR_COLORS = ["#8B2E2E", "#2E5C8B", "#2E8B57", "#8B6F2E", "#5C2E8B", "#2E8B8B", "#8B2E6F"]

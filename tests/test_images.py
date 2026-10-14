@@ -213,9 +213,13 @@ def test_get_fighter_image_url_caches_after_first_lookup():
     assert calls == ["Jon Jones"]  # only fetched once
 
 
-def test_get_fighter_image_url_caches_a_miss_too():
-    # A fighter confirmed to have no photo must not be re-requested from
-    # ufc.com on every subsequent selection in the same session.
+def test_get_fighter_image_url_never_caches_a_miss():
+    # Deliberately the opposite of naive caching: a miss - no photo found,
+    # OR any fetch failure (timeout, non-200, rate-limiting) - must be
+    # retried on every lookup, never permanently stamped as "no photo".
+    # Caching misses would mean one bad network moment (confirmed to
+    # happen in production) silently and permanently locks a real fighter
+    # out of ever getting their actual photo.
     calls = []
 
     def fake_fetch(name):
@@ -225,8 +229,8 @@ def test_get_fighter_image_url_caches_a_miss_too():
     cache = {}
     img.get_fighter_image_url("id2", "Obscure Fighter", cache=cache, fetch=fake_fetch)
     img.get_fighter_image_url("id2", "Obscure Fighter", cache=cache, fetch=fake_fetch)
-    assert calls == ["Obscure Fighter"]
-    assert cache["id2"] is None
+    assert calls == ["Obscure Fighter", "Obscure Fighter"]  # fetched again, not served from a cached None
+    assert cache == {}  # nothing ever written for a miss
 
 
 def test_get_fighter_image_url_different_fighters_both_fetched():
@@ -264,14 +268,34 @@ def test_cache_persists_to_disk_and_reloads_across_restarts(tmp_path):
     assert calls == ["Jon Jones"]  # never fetched a second time, even in a fresh cache dict
 
 
-def test_cache_persists_a_confirmed_miss_too():
+def test_cache_never_persists_a_miss_to_disk():
     cache_file_cache = {}
 
     def fake_fetch(name):
         return None
 
     img.get_fighter_image_url("id2", "Obscure Fighter", cache=cache_file_cache, fetch=fake_fetch, persist=False)
-    assert cache_file_cache == {"id2": None}
+    assert cache_file_cache == {}
+
+
+def test_get_fighter_image_url_self_heals_after_a_transient_failure():
+    # The scenario this whole policy exists for: a fighter whose FIRST
+    # lookup fails (rate-limited, timed out, whatever) must still succeed
+    # on a later lookup once the underlying issue clears - not be stuck
+    # showing the initials avatar forever because of one bad attempt.
+    results = iter([None, "https://ufc.com/images/jones.png"])
+
+    def flaky_fetch(name):
+        return next(results)
+
+    cache = {}
+    first = img.get_fighter_image_url("id1", "Jon Jones", cache=cache, fetch=flaky_fetch)
+    assert first is None
+    assert cache == {}
+
+    second = img.get_fighter_image_url("id1", "Jon Jones", cache=cache, fetch=flaky_fetch)
+    assert second == "https://ufc.com/images/jones.png"
+    assert cache == {"id1": "https://ufc.com/images/jones.png"}
 
 
 def test_load_cache_from_disk_missing_file_returns_empty_dict(tmp_path):
