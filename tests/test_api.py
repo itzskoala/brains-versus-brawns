@@ -30,6 +30,23 @@ def test_fighters_scoped_to_division_contains_known_fighter(client):
     assert any("Jon Jones" in n for n in names)
 
 
+def test_fighters_include_raw_name_and_nickname_for_frontend_search_and_titles(client):
+    fighters = client.get("/fighters", params={"division": "Bantamweight"}).json()
+    omalley = next(f for f in fighters if f["fighter_name"] == "Sean O'Malley")
+    assert omalley["nick_name"] == "Suga"
+    # display_name is unchanged (still DOB-disambiguated, no nickname) -
+    # the new fields are additive, not a replacement.
+    assert "Suga" not in omalley["display_name"]
+
+
+def test_fighters_nickname_is_none_not_nan_when_absent(client):
+    fighters = client.get("/fighters", params={"division": "Light Heavyweight"}).json()
+    jones = next(f for f in fighters if f["fighter_name"] == "Jon Jones")
+    assert jones["nick_name"] is None or isinstance(jones["nick_name"], str)
+    no_nickname = [f for f in fighters if f["nick_name"] is None]
+    assert len(no_nickname) > 0
+
+
 def _fighter_id(client, division, name_fragment):
     fighters = client.get("/fighters", params={"division": division}).json()
     return next(f["fighter_id"] for f in fighters if name_fragment in f["display_name"])

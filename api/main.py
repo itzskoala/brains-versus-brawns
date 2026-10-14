@@ -74,11 +74,16 @@ def _build_fighter_index(fights, fighters_df):
             name = row["fighter_name"]
             dob = row["dob"]
             display_name = f"{name} (b. {dob})" if pd.notna(dob) else name
+            nick_name = row["fighter_nick_name"] if pd.notna(row["fighter_nick_name"]) else None
         else:
+            name = fighter_id
             display_name = fighter_id
+            nick_name = None
 
         index[fighter_id] = {
             "fighter_id": fighter_id,
+            "fighter_name": name,
+            "nick_name": nick_name,
             "display_name": display_name,
             "divisions": set(group["weight_class"].dropna().unique()),
             "years": sorted(int(y) for y in group["event_date"].dt.year.unique()),
@@ -152,7 +157,8 @@ def get_models():
 def get_fighters(division: str):
     fighter_index = _state["fighter_index"]
     results = [
-        {"fighter_id": info["fighter_id"], "display_name": info["display_name"], "years": info["years"]}
+        {"fighter_id": info["fighter_id"], "fighter_name": info["fighter_name"],
+         "nick_name": info["nick_name"], "display_name": info["display_name"], "years": info["years"]}
         for info in fighter_index.values()
         if division in info["divisions"]
     ]

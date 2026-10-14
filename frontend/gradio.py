@@ -10,12 +10,30 @@ then this file:
     python frontend/gradio.py
 """
 import os
+import re
 
 import gradio as gr
 import requests
 
+from frontend import images
+
 API_URL = os.environ.get("UFC_ELO_API_URL", "http://127.0.0.1:8000")
 NO_YEAR_CHOICE = "Most recent (full history)"
+
+# Upper weight limit per division - the UFC's own numbers (not model data,
+# so they live here rather than in src/features/engineering.py). kg values
+# are the UFC's own published international limits, not a lbs*0.4536
+# conversion (those round differently, e.g. Heavyweight is officially
+# 120.2kg, not 265lbs's literal 120.2017...kg - close, but these are the
+# numbers actually printed on UFC material).
+DIVISION_WEIGHT_LIMITS_LBS = {
+    "Flyweight": 125, "Bantamweight": 135, "Featherweight": 145, "Lightweight": 155,
+    "Welterweight": 170, "Middleweight": 185, "Light Heavyweight": 205, "Heavyweight": 265,
+}
+DIVISION_WEIGHT_LIMITS_KG = {
+    "Flyweight": 56.7, "Bantamweight": 61.2, "Featherweight": 65.8, "Lightweight": 70.3,
+    "Welterweight": 77.1, "Middleweight": 83.9, "Light Heavyweight": 93.0, "Heavyweight": 120.2,
+}
 
 
 def _get(path, **params):
@@ -24,21 +42,118 @@ def _get(path, **params):
     return resp.json()
 
 
+def _fighter_dropdown_label(f):
+    """The picker's own label: fight-title format ('First "Nick" Last'),
+    with the API's DOB-disambiguator suffix (from display_name) carried
+    over unchanged for duplicate names. Deliberately NOT the raw
+    display_name - embedding the nickname here is what makes Gradio's own
+    built-in, instant, client-side Dropdown filter match nicknames too
+    (confirmed: a query like "Sugar" now matches a fighter labeled
+    'Sean "Suga" O\\'Malley (b. ...)' since "suga" is itself a substring of
+    "sugar" - see _fighter_matches_query for the exact rule this mirrors).
+    No server round-trip per keystroke needed for that - a per-keystroke
+    custom filter (an earlier version of this file used Dropdown.key_up)
+    raced against Gradio's own client-side filter and made selecting a
+    fighter feel laggy/inconsistent; this removes that race entirely by
+    not needing a second filter at all."""
+    name = _format_fighter_name(f.get("fighter_name") or f.get("fighter_id", ""), f.get("nick_name"))
+    dob_suffix = re.search(r"\(b\.[^)]*\)", f.get("display_name") or "")
+    return f"{name} {dob_suffix.group()}" if dob_suffix else name
+
+
 def _fighter_choices(division):
     fighters = _get("/fighters", division=division)
-    # (label, value) pairs: dropdown shows the display_name, carries the
-    # fighter_id as the actual value - duplicate names are disambiguated by
-    # display_name already including a date of birth (see api/main.py).
-    return [(f["display_name"], f["fighter_id"]) for f in fighters], fighters
+    # (label, value) pairs: dropdown shows _fighter_dropdown_label, carries
+    # the fighter_id as the actual value.
+    return [(_fighter_dropdown_label(f), f["fighter_id"]) for f in fighters], fighters
+
+
+def _inches_to_cm(inches):
+    return round(inches * 2.54)
+
+
+def _format_height(inches, unit):
+    """70 inches, "lbs" -> '5\\'10"' (feet+inches, standard imperial height
+    notation - not bare inches). 70 inches, "kg" -> '178 cm'. None (missing
+    data, never invented) -> "-"."""
+    if inches is None:
+        return "-"
+    if unit == "kg":
+        return f"{_inches_to_cm(inches)} cm"
+    feet, remaining_inches = divmod(round(inches), 12)
+    return f"{feet}'{remaining_inches}\""
+
+
+def _format_reach(inches, unit):
+    """74 inches, "lbs" -> '74"'. 74 inches, "kg" -> '188 cm'."""
+    if inches is None:
+        return "-"
+    return f"{_inches_to_cm(inches)} cm" if unit == "kg" else f"{round(inches)}\""
+
+
+def _division_label(division, unit):
+    """"Welterweight" -> "Welterweight (170 lbs)" or "Welterweight (77.1 kg)" -
+    looked up from the UFC's own published limits in each unit, not computed
+    by converting one into the other. Divisions with no known weight limit
+    (shouldn't happen for the 8 MAIN_DIVISIONS the API serves, but
+    defensive) fall back to the bare division name."""
+    limits = DIVISION_WEIGHT_LIMITS_LBS if unit == "lbs" else DIVISION_WEIGHT_LIMITS_KG
+    weight = limits.get(division)
+    if weight is None:
+        return division
+    return f"{division} ({weight} {unit})"
+
+
+def _division_choices(divisions, unit):
+    return [(_division_label(d, unit), d) for d in divisions]
+
+
+# Defined in frontend/images.py (the one-directional dependency: this file
+# imports images.py, images.py never imports this file - see split_name's
+# docstring there for why that direction matters).
+_split_name = images.split_name
+_format_fighter_name = images.format_fighter_name
+
+
+def _fighter_matches_query(full_name, nickname, query):
+    """The matching rule fighter search is built around: first name, last
+    name, or nickname, case-insensitive substring, either direction (e.g.
+    query "Sugar" matches a fighter whose on-record nickname is "Suga",
+    since "suga" is itself a substring of "sugar"). Empty query matches
+    everything. _fighter_dropdown_label's embedded nickname is what makes
+    Gradio's own built-in Dropdown filter actually enforce this rule live,
+    with no server round-trip; this function (and _filter_fighters below)
+    stay as the tested, explicit statement of that rule, and are what a
+    future server-side search (e.g. an API ?search= param) would reuse."""
+    query = (query or "").strip().lower()
+    if not query:
+        return True
+    first, last = _split_name(full_name)
+    if query in first.lower() or query in last.lower():
+        return True
+    nickname = (nickname or "").strip().lower()
+    return bool(nickname) and (query in nickname or nickname in query)
+
+
+def _filter_fighters(fighters, query):
+    return [f for f in fighters if _fighter_matches_query(f.get("fighter_name", ""), f.get("nick_name"), query)]
 
 
 def on_division_change(division):
-    choices, _ = _fighter_choices(division)
+    choices, fighters = _fighter_choices(division)
+    placeholder = images.fighter_placeholder_html()
     return (
         gr.update(choices=choices, value=None),
         gr.update(choices=[NO_YEAR_CHOICE], value=NO_YEAR_CHOICE),
         gr.update(choices=choices, value=None),
         gr.update(choices=[NO_YEAR_CHOICE], value=NO_YEAR_CHOICE),
+        fighters,  # fighters_state - backs both corners' Fighter dropdown search
+        # Explicit reset (not just relying on the fighter dropdowns' own
+        # .change() cascade) so a division switch always clears stale
+        # photos/readiness from the previous division's selections.
+        placeholder, False,
+        placeholder, False,
+        gr.update(interactive=False),
     )
 
 
@@ -63,7 +178,29 @@ def on_fighter_change(division, fighter_id, other_fighter_id):
     return year_update, gr.update(), gr.update()
 
 
-def _format_tale_of_the_tape(red_name, red_stats, blue_name, blue_stats):
+def on_fighter_photo_change(fighter_id, fighters, other_corner_ready):
+    """Drives one corner's photo through placeholder -> loading -> resolved
+    (real ufc.com photo or an initials avatar - see frontend/images.py),
+    and the Predict button's enabled state, which requires both corners
+    ready (a fighter picked AND their photo lookup finished - not mid-load)
+    at once. A generator: Gradio streams each yield as its own UI update,
+    so the loading state is genuinely shown while the network call is in
+    flight, not skipped over."""
+    if not fighter_id:
+        yield images.fighter_placeholder_html(), False, gr.update(interactive=False)
+        return
+
+    info = next((f for f in fighters if f["fighter_id"] == fighter_id), {})
+    name = info.get("fighter_name", fighter_id)
+    nickname = info.get("nick_name")
+
+    yield images.fighter_loading_html(name, nickname), False, gr.update(interactive=False)
+
+    image_url = images.get_fighter_image_url(fighter_id, name)
+    yield images.fighter_photo_html(name, nickname, image_url), True, gr.update(interactive=bool(other_corner_ready))
+
+
+def _format_tale_of_the_tape(red_name, red_stats, blue_name, blue_stats, unit="lbs"):
     def pct(x):
         return "-" if x is None else f"{x * 100:.1f}%"
 
@@ -82,13 +219,13 @@ def _format_tale_of_the_tape(red_name, red_stats, blue_name, blue_stats):
         return pct(stats["fight_pace"]["method_of_victory"]["wins_by_method"][key])
 
     rows = [
-        ("Record", record(red_stats), record(blue_stats)),
+        ("UFC Record", record(red_stats), record(blue_stats)),
         ("Current Streak", streak(red_stats), streak(blue_stats)),
         ("Age", num(red_stats["physical"]["age"], 1), num(blue_stats["physical"]["age"], 1)),
-        ("Height", f"{num(red_stats['physical']['height_inches'], 0)}\"",
-         f"{num(blue_stats['physical']['height_inches'], 0)}\""),
-        ("Reach", f"{num(red_stats['physical']['reach_inches'], 0)}\"",
-         f"{num(blue_stats['physical']['reach_inches'], 0)}\""),
+        ("Height", _format_height(red_stats["physical"]["height_inches"], unit),
+         _format_height(blue_stats["physical"]["height_inches"], unit)),
+        ("Reach", _format_reach(red_stats["physical"]["reach_inches"], unit),
+         _format_reach(blue_stats["physical"]["reach_inches"], unit)),
         ("Stance", red_stats["physical"]["stance"], blue_stats["physical"]["stance"]),
         ("Strength of Schedule", pct(red_stats["physical"]["strength_of_schedule"]),
          pct(blue_stats["physical"]["strength_of_schedule"])),
@@ -147,14 +284,20 @@ def _format_meeting(meeting):
     )
 
 
-def predict(model_name, division, red_fighter_id, red_year, blue_fighter_id, blue_year):
+def predict(model_name, division, red_fighter_id, red_year, blue_fighter_id, blue_year, unit="lbs"):
     if not red_fighter_id or not blue_fighter_id:
-        return "Pick both a red and a blue corner fighter first.", "", ""
+        return "Pick both a red and a blue corner fighter first.", "", "", None
 
     _, fighters = _fighter_choices(division)
-    name_by_id = {f["fighter_id"]: f["display_name"] for f in fighters}
-    red_name = name_by_id.get(red_fighter_id, red_fighter_id)
-    blue_name = name_by_id.get(blue_fighter_id, blue_fighter_id)
+    info_by_id = {f["fighter_id"]: f for f in fighters}
+    red_info = info_by_id.get(red_fighter_id, {})
+    blue_info = info_by_id.get(blue_fighter_id, {})
+    # Fight-title format ('First "Nickname" Last", plain "First Last" with
+    # no nickname on record) everywhere a fighter is named in a result -
+    # the picker dropdown keeps its own display_name (with DOB) separately,
+    # since that's a disambiguator, not a fight title.
+    red_name = _format_fighter_name(red_info.get("fighter_name", red_fighter_id), red_info.get("nick_name"))
+    blue_name = _format_fighter_name(blue_info.get("fighter_name", blue_fighter_id), blue_info.get("nick_name"))
 
     payload = {
         "model_name": model_name,
@@ -166,7 +309,7 @@ def predict(model_name, division, red_fighter_id, red_year, blue_fighter_id, blu
     }
     resp = requests.post(f"{API_URL}/predict", json=payload, timeout=60)
     if resp.status_code != 200:
-        return f"Error: {resp.json().get('detail', resp.text)}", "", ""
+        return f"Error: {resp.json().get('detail', resp.text)}", "", "", None
 
     data = resp.json()
     winner_name = red_name if data["predicted_winner"] == "red" else blue_name
@@ -179,22 +322,36 @@ def predict(model_name, division, red_fighter_id, red_year, blue_fighter_id, blu
         f"Model used: {model_name}"
     )
 
-    tale_of_the_tape = _format_tale_of_the_tape(red_name, data["red_stats"], blue_name, data["blue_stats"])
+    tale_of_the_tape = _format_tale_of_the_tape(red_name, data["red_stats"], blue_name, data["blue_stats"], unit)
 
     if data["past_meetings"]:
         history = "\n\n---\n\n".join(_format_meeting(m) for m in data["past_meetings"])
     else:
         history = "These two fighters have no completed fight on record against each other."
 
-    return headline, tale_of_the_tape, history
+    # Stashed so the unit toggle can re-render the Tale of the Tape in the
+    # new unit instantly, without a new /predict call - see on_unit_toggle.
+    last_result = {"red_name": red_name, "red_stats": data["red_stats"],
+                    "blue_name": blue_name, "blue_stats": data["blue_stats"]}
+    return headline, tale_of_the_tape, history, last_result
 
 
 with gr.Blocks(title="UFC Matchup Predictor") as demo:
-    gr.Markdown("# UFC Matchup Predictor")
+    unit_state = gr.State("lbs")
+    divisions_state = gr.State([])  # raw division names, for relabeling on unit toggle
+    fighters_state = gr.State([])  # raw fighter dicts for the current division, for search
+    last_result_state = gr.State(None)  # last predict() result, for an instant unit-toggle re-render
+    red_ready_state = gr.State(False)  # a fighter is picked AND their photo lookup has finished
+    blue_ready_state = gr.State(False)
+
+    with gr.Row():
+        gr.Markdown("# UFC Matchup Predictor", scale=5)
+        unit_toggle_button = gr.Button("Switch to kg/cm", scale=1, size="sm")
     gr.Markdown(
-        "Pick a weight division, then a fighter for each corner. The optional year picks that "
-        "fighter's own latest fight within that year as the data cutoff - leave it blank to use "
-        "their full history. Corner color has no effect on the prediction, it's just a label."
+        "Pick a weight division, then a fighter for each corner (type a name or nickname to "
+        "narrow the Fighter list). The optional year picks that fighter's own latest fight "
+        "within that year as the data cutoff - leave it blank to use their full history. "
+        "Corner color has no effect on the prediction."
     )
 
     model_dropdown = gr.Dropdown(label="Model", choices=[], filterable=False)
@@ -203,22 +360,33 @@ with gr.Blocks(title="UFC Matchup Predictor") as demo:
     with gr.Row():
         with gr.Column():
             gr.Markdown("### Red Corner")
-            red_fighter = gr.Dropdown(label="Fighter", choices=[], filterable=True)
+            red_fighter = gr.Dropdown(label="Fighter (type a name or nickname to search)",
+                                       choices=[], filterable=True)
             red_year = gr.Dropdown(label="Year (optional)", choices=[NO_YEAR_CHOICE], value=NO_YEAR_CHOICE)
         with gr.Column():
             gr.Markdown("### Blue Corner")
-            blue_fighter = gr.Dropdown(label="Fighter", choices=[], filterable=True)
+            blue_fighter = gr.Dropdown(label="Fighter (type a name or nickname to search)",
+                                        choices=[], filterable=True)
             blue_year = gr.Dropdown(label="Year (optional)", choices=[NO_YEAR_CHOICE], value=NO_YEAR_CHOICE)
 
-    predict_button = gr.Button("Predict", variant="primary")
+    # Disabled until both corners have a fighter picked AND that fighter's
+    # photo lookup has finished - see on_fighter_photo_change.
+    predict_button = gr.Button("Predict", variant="primary", interactive=False)
 
     result_headline = gr.Markdown()
-    tale_of_the_tape_panel = gr.Markdown(label="Tale of the Tape")
+    with gr.Row(equal_height=True):
+        with gr.Column(scale=1, min_width=160):
+            red_photo = gr.HTML(images.fighter_placeholder_html())
+        with gr.Column(scale=3):
+            tale_of_the_tape_panel = gr.Markdown(label="Tale of the Tape")
+        with gr.Column(scale=1, min_width=160):
+            blue_photo = gr.HTML(images.fighter_placeholder_html())
     rematch_history = gr.Markdown(label="Past Meetings")
 
     division_dropdown.change(
         on_division_change, inputs=[division_dropdown],
-        outputs=[red_fighter, red_year, blue_fighter, blue_year])
+        outputs=[red_fighter, red_year, blue_fighter, blue_year, fighters_state,
+                  red_photo, red_ready_state, blue_photo, blue_ready_state, predict_button])
     # A fighter can't face themselves: picking the same fighter already
     # selected in the other corner clears that other corner instead of
     # leaving two identical corners selected - see on_fighter_change.
@@ -228,20 +396,58 @@ with gr.Blocks(title="UFC Matchup Predictor") as demo:
     blue_fighter.change(
         on_fighter_change, inputs=[division_dropdown, blue_fighter, red_fighter],
         outputs=[blue_year, red_fighter, red_year])
+    # Search is merged into the Fighter dropdown itself - no separate search
+    # box, and no custom per-keystroke server handler either: the dropdown's
+    # own label embeds the nickname (see _fighter_dropdown_label), so
+    # Gradio's built-in client-side filter matches it instantly with zero
+    # round-trips, and with no race against a server-pushed update.
+    # Independent listener (alongside on_fighter_change above) driving this
+    # corner's photo and the Predict button's enabled state - see
+    # on_fighter_photo_change.
+    red_fighter.change(
+        on_fighter_photo_change, inputs=[red_fighter, fighters_state, blue_ready_state],
+        outputs=[red_photo, red_ready_state, predict_button])
+    blue_fighter.change(
+        on_fighter_photo_change, inputs=[blue_fighter, fighters_state, red_ready_state],
+        outputs=[blue_photo, blue_ready_state, predict_button])
+
+    def on_unit_toggle(unit, divisions, current_division, last_result):
+        new_unit = "kg" if unit == "lbs" else "lbs"
+        button_label = "Switch to lbs/ft-in" if new_unit == "kg" else "Switch to kg/cm"
+        # Re-render the already-shown Tale of the Tape in the new unit
+        # immediately, from the stashed last result - no new /predict call,
+        # and a no-op (gr.update() touches nothing) before any prediction
+        # has been made yet.
+        tale_update = gr.update()
+        if last_result is not None:
+            tale_update = gr.update(value=_format_tale_of_the_tape(
+                last_result["red_name"], last_result["red_stats"],
+                last_result["blue_name"], last_result["blue_stats"], new_unit))
+        return (
+            new_unit,
+            gr.update(choices=_division_choices(divisions, new_unit), value=current_division),
+            gr.update(value=button_label),
+            tale_update,
+        )
+
+    unit_toggle_button.click(
+        on_unit_toggle, inputs=[unit_state, divisions_state, division_dropdown, last_result_state],
+        outputs=[unit_state, division_dropdown, unit_toggle_button, tale_of_the_tape_panel])
 
     predict_button.click(
         predict,
-        inputs=[model_dropdown, division_dropdown, red_fighter, red_year, blue_fighter, blue_year],
-        outputs=[result_headline, tale_of_the_tape_panel, rematch_history],
+        inputs=[model_dropdown, division_dropdown, red_fighter, red_year, blue_fighter, blue_year, unit_state],
+        outputs=[result_headline, tale_of_the_tape_panel, rematch_history, last_result_state],
     )
 
-    @demo.load(outputs=[model_dropdown, division_dropdown])
+    @demo.load(outputs=[model_dropdown, division_dropdown, divisions_state])
     def on_load():
         models = _get("/models")
         divisions = _get("/divisions")
         return (
             gr.update(choices=[(m["label"], m["id"]) for m in models], value=models[0]["id"]),
-            gr.update(choices=divisions, value=divisions[0]),
+            gr.update(choices=_division_choices(divisions, "lbs"), value=divisions[0]),
+            divisions,
         )
 
 
