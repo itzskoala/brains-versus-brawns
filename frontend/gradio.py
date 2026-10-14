@@ -202,6 +202,38 @@ def on_fighter_photo_change(fighter_id, fighters, other_corner_selected):
     yield images.fighter_photo_html(name, nickname, image_url), True, predict_interactive
 
 
+# Below this many prior UFC fights, every per-minute/share/accuracy stat in
+# the tape is a ratio built from very little data (e.g. one short fight can
+# produce a 16+ sig. strikes/min pace that is arithmetically correct but
+# not a stable career rate - see docs/results.md Known Limitations). Flagged
+# here, display-only: the underlying numbers are unchanged, and the model
+# already has prior_fights/experience_diff available to weigh this itself.
+LOW_SAMPLE_FIGHT_THRESHOLD = 5
+
+
+def _low_sample_caveat(red_name, red_stats, blue_name, blue_stats):
+    """A one-line caveat naming any corner whose career-rate stats above are
+    built from fewer than LOW_SAMPLE_FIGHT_THRESHOLD prior fights - empty
+    string if neither corner is that new. Record counts (not rates) are
+    exact regardless of sample size, so this only warns about the ratio
+    stats (striking/grappling rates, strength of schedule)."""
+    thin = [
+        (name, stats["record"]["prior_fights"])
+        for name, stats in ((red_name, red_stats), (blue_name, blue_stats))
+        if stats["record"]["prior_fights"] < LOW_SAMPLE_FIGHT_THRESHOLD
+    ]
+    if not thin:
+        return ""
+    names = " and ".join(
+        f"{name} ({int(n)} prior UFC fight{'s' if n != 1 else ''})" for name, n in thin)
+    return (
+        f"\n\n*⚠️ {names} - the rate-based stats above (striking/grappling "
+        f"per-minute or per-15-min figures, accuracy, strength of schedule) "
+        f"are built from very little fight data and may not be reliable "
+        f"career indicators.*"
+    )
+
+
 def _format_tale_of_the_tape(red_name, red_stats, blue_name, blue_stats, unit="lbs"):
     def pct(x):
         return "-" if x is None else f"{x * 100:.1f}%"
@@ -254,7 +286,7 @@ def _format_tale_of_the_tape(red_name, red_stats, blue_name, blue_stats, unit="l
 
     lines = ["### Tale of the Tape", "", f"| {red_name} | | {blue_name} |", "|---:|:---:|:---|"]
     lines += [f"| {red_val} | {label} | {blue_val} |" for label, red_val, blue_val in rows]
-    return "\n".join(lines)
+    return "\n".join(lines) + _low_sample_caveat(red_name, red_stats, blue_name, blue_stats)
 
 
 def _format_meeting(meeting):

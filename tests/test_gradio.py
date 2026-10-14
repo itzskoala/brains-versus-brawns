@@ -127,3 +127,57 @@ def test_filter_fighters_narrows_list_by_nickname():
 def test_filter_fighters_empty_query_returns_all():
     fighters = [{"fighter_id": "1", "fighter_name": "Jon Jones", "nick_name": None}]
     assert fg._filter_fighters(fighters, "") == fighters
+
+
+def _make_stats(prior_fights, prior_wins=0):
+    # minimal build_display_stats-shaped dict - only the fields
+    # _format_tale_of_the_tape/_low_sample_caveat actually read.
+    return {
+        "striking": {"slpm": 1.0, "striking_accuracy": 0.5, "sapm": 1.0, "striking_defense": 0.5},
+        "grappling": {"takedown_avg_per_15min": 0.0, "takedown_accuracy": None,
+                      "takedown_defense": None, "sub_att_per_15min": 0.0},
+        "physical": {"age": 30.0, "stance": "Orthodox", "height_inches": 70.0,
+                     "reach_inches": 72.0, "strength_of_schedule": 0.5},
+        "fight_pace": {"avg_fight_time_min": 10.0, "method_of_victory": {
+            "occurrence": {"ko_tko": 0.0, "submission": 0.0, "decision": 0.0, "other": 0.0},
+            "wins_by_method": {"ko_tko": 0.0, "submission": 0.0, "decision": 0.0, "other": 0.0}}},
+        "record": {"prior_fights": prior_fights, "prior_wins": prior_wins,
+                   "prior_win_rate": (prior_wins / prior_fights) if prior_fights else None,
+                   "win_streak": 0, "loss_streak": 0, "form_last5_win_rate": None},
+    }
+
+
+def test_low_sample_caveat_absent_when_both_corners_have_enough_fights():
+    red = _make_stats(prior_fights=10, prior_wins=8)
+    blue = _make_stats(prior_fights=20, prior_wins=15)
+    assert fg._low_sample_caveat("Red Fighter", red, "Blue Fighter", blue) == ""
+
+
+def test_low_sample_caveat_names_the_thin_corner_with_its_fight_count():
+    red = _make_stats(prior_fights=1, prior_wins=1)
+    blue = _make_stats(prior_fights=20, prior_wins=15)
+    note = fg._low_sample_caveat("Gable Steveson", red, "Jon Jones", blue)
+    assert "Gable Steveson (1 prior UFC fight)" in note
+    assert "Jon Jones" not in note
+
+
+def test_low_sample_caveat_names_both_corners_when_both_are_thin():
+    red = _make_stats(prior_fights=0)
+    blue = _make_stats(prior_fights=2, prior_wins=1)
+    note = fg._low_sample_caveat("Red Fighter", red, "Blue Fighter", blue)
+    assert "Red Fighter (0 prior UFC fights)" in note
+    assert "Blue Fighter (2 prior UFC fights)" in note
+
+
+def test_format_tale_of_the_tape_appends_low_sample_caveat():
+    red = _make_stats(prior_fights=1, prior_wins=1)
+    blue = _make_stats(prior_fights=20, prior_wins=15)
+    tape = fg._format_tale_of_the_tape("Gable Steveson", red, "Jon Jones", blue)
+    assert "Gable Steveson (1 prior UFC fight)" in tape
+
+
+def test_format_tale_of_the_tape_no_caveat_when_both_corners_established():
+    red = _make_stats(prior_fights=10, prior_wins=8)
+    blue = _make_stats(prior_fights=20, prior_wins=15)
+    tape = fg._format_tale_of_the_tape("Red Fighter", red, "Blue Fighter", blue)
+    assert "⚠️" not in tape

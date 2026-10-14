@@ -1,12 +1,16 @@
+import math
+
 import pandas as pd
 import pytest
 
-from src.features.engineering import FIGHT_STAT_COLUMNS
+from src.features.engineering import FIGHT_STAT_COLUMNS, engineer_fold_features
 from src.features.snapshot import (
+    build_fighter_opponent_stats,
     build_fighter_snapshot,
     build_matchup_features,
     fighter_fight_years,
     latest_fight_date,
+    strength_of_schedule,
 )
 
 
@@ -168,6 +172,77 @@ def test_build_matchup_features_missing_indicator_tracks_the_paired_value():
     # red's prior_win_rate was NaN -> the diff itself was NaN before fill.
     assert feats["prior_win_rate_diff_was_missing"] == 1
     assert feats["age_diff_was_missing"] == 0
+
+
+def test_strength_of_schedule_averages_opponents_own_point_in_time_win_rate():
+    # O1 beats Z first (O1 is 1-0 by the time X meets them) - X's SOS should
+    # see O1's record AS OF that fight, not O1's eventual record.
+    g1 = make_fight("g1", "2009-01-01", "O1", "Z", "O1")
+    g2 = make_fight("g2", "2010-01-01", "X", "O1", "O1")  # X's debut, O1 (1-0) wins
+    # O2 has no fights of their own before meeting X - a debut-vs-debut
+    # opponent, so O2's own prior_win_rate is 0/0 (NaN), not 0.
+    g3 = make_fight("g3", "2011-01-01", "X", "O2", "X")
+    # O3 lost their only prior fight (0-1) before meeting X.
+    g4 = make_fight("g4", "2011-06-01", "O3", "Z2", "Z2")
+    g5 = make_fight("g5", "2012-01-01", "X", "O3", "X")
+    fights = pd.DataFrame([g1, g2, g3, g4, g5])
+    fights_with_features, _ = engineer_fold_features(fights, fights.iloc[0:0])
+
+    sos = strength_of_schedule(fights_with_features, "X", pd.Timestamp("2012-01-01"))
+    # O2's NaN (debut) is skipped rather than treated as a 0; only O1 (1.0)
+    # and O3 (0.0) contribute.
+    assert sos == pytest.approx(0.5)
+
+
+def test_strength_of_schedule_is_nan_before_the_fighters_debut():
+    g1 = make_fight("g1", "2010-01-01", "X", "A", "X")
+    fights = pd.DataFrame([g1])
+    fights_with_features, _ = engineer_fold_features(fights, fights.iloc[0:0])
+
+    sos = strength_of_schedule(fights_with_features, "X", pd.Timestamp("2000-01-01"))
+    assert math.isnan(sos)
+
+
+def test_build_fighter_opponent_stats_small_sample_is_exact_not_an_estimate():
+    # A single short fight: X lands 10 sig. strikes, absorbs 4, over a
+    # 1-round, 60-second finish (1 minute) - sapm/striking_defense should be
+    # the exact ratio from that one fight, not padded or shrunk.
+    fight = make_fight("f1", "2015-01-01", "X", "A", "X", finish_round=1, rounds_fought=1)
+    fight["finish_time"] = 60
+    fight["r_total_sig_landed"] = 10
+    fight["r_total_sig_atmp"] = 15
+    fight["b_total_sig_landed"] = 4
+    fight["b_total_sig_atmp"] = 8
+    fights = pd.DataFrame([fight])
+
+    stats = build_fighter_opponent_stats(fights, "X", pd.Timestamp("2015-01-01"))
+    assert stats["sapm"] == pytest.approx(4.0)  # 4 absorbed / 1 minute
+    assert stats["striking_defense"] == pytest.approx(1 - 4 / 8)
+    assert stats["avg_fight_time_min"] == pytest.approx(1.0)
+
+
+def test_build_fighter_opponent_stats_zero_attempts_is_nan_not_zero():
+    # Opponent never attempted a takedown against X - 0/0 must stay
+    # undefined (NaN), not collapse to a (misleadingly perfect) 0.
+    fight = make_fight("f1", "2015-01-01", "X", "A", "X")
+    fights = pd.DataFrame([fight])
+
+    stats = build_fighter_opponent_stats(fights, "X", pd.Timestamp("2015-01-01"))
+    assert math.isnan(stats["takedown_defense"])
+
+
+def test_build_fighter_opponent_stats_excludes_fights_with_no_round_detail():
+    # rounds_fought == 0 is the "no fight_rounds.csv detail" missingness
+    # marker (see engineering.py _prior_career_totals) - must contribute to
+    # neither the numerator nor the denominator, not be read as a real
+    # zero-output fight.
+    fight = make_fight("f1", "2015-01-01", "X", "A", "X", rounds_fought=0)
+    fight["b_total_sig_landed"] = 999  # would corrupt sapm if not excluded
+    fights = pd.DataFrame([fight])
+
+    stats = build_fighter_opponent_stats(fights, "X", pd.Timestamp("2015-01-01"))
+    assert math.isnan(stats["sapm"])
+    assert math.isnan(stats["avg_fight_time_min"])
 
 
 def test_build_matchup_features_uses_imputer_fill_value_not_zero():

@@ -291,7 +291,45 @@ Record useful lessons discovered during development.
 
 Document known limitations of the data, Elo system, models, evaluation, API, or deployment.
 
-*
+* **Career-rate features have no small-sample shrinkage.** Every per-minute/share/accuracy
+  feature in `add_career_stat_features`/`build_fighter_opponent_stats`/`strength_of_schedule`
+  is a plain ratio over a fighter's own prior fights, with no confidence weighting or
+  Bayesian shrinkage toward a population prior based on fight count. For a 1-fight fighter
+  (e.g. Gable Steveson vs. Jon Jones, audited 2026-10-14), a single short, lopsided fight
+  produces arithmetically correct but statistically unstable numbers (16.29 sig. str./min
+  from 41 strikes over a 2.52-minute fight; 0.0% strength of schedule from a single
+  opponent who happened to be 0-1 at the time). Confirmed this is not a "missing treated as
+  zero" bug: genuine 0/0 cases (e.g. a fighter who has never attempted a takedown) still
+  correctly surface as `NaN` -> `None` -> "-" through `api/main.py _native` and the model's
+  imputer fills with the training-fold median, not 0 (`src/features/imputation.py`) - see
+  `tests/test_snapshot.py`'s `build_fighter_opponent_stats`/`strength_of_schedule` tests
+  (added 2026-10-14) for both the exact-ratio and the NaN-not-zero cases. XGBoost's own
+  SHAP-style (`pred_contribs=True`) breakdown of the Jones/Steveson prediction confirms the
+  model itself already discounts this via `experience_diff`/`self_experience`/`age_diff` -
+  the raw per-minute stats aren't among its top contributors - so the one confirmed,
+  evidence-backed fix applied is display-only: `frontend/gradio.py`'s
+  `_format_tale_of_the_tape` now appends a caveat naming any corner with fewer than
+  `LOW_SAMPLE_FIGHT_THRESHOLD` (5) prior fights, so the UI doesn't present a 1-fight
+  extrapolation with the same implied confidence as a 20-fight career rate. No feature
+  engineering or model behavior changed.
+* **`COMBINED_FEATURE_COLUMNS` (the production feature set for all three models) contains
+  exact linear dependencies**: for every base in `PAIRED_BASES` (age, experience,
+  prior_win_rate, win_streak, loss_streak, form_last5_win_rate, every career volume/style
+  stat, reach_inches_x_division), `<base>_diff` is deterministically `self_<base> -
+  opp_<base>` - all three are fit simultaneously. `representation_comparison.py` already
+  validated that this combined representation beats diffs-only on every metric for all
+  three models (docs above), so this is NOT being undone - but it means a single
+  coefficient's sign/magnitude in the logistic regression is not independently
+  interpretable for a collinear group. Confirmed directly: explaining the live Hill vs.
+  Pereira logistic-regression prediction (2026-10-14 audit) by `coefficient * scaled_value`
+  showed `form_last5_win_rate_diff` with a *negative* coefficient, i.e. the model's literal
+  per-feature attribution implies better recent form reduces win probability - a collinearity
+  artifact of also including `self_form_last5_win_rate`/`opp_form_last5_win_rate` in the
+  same fit, not a learned real-world relationship. Tree-based models (XGBoost's
+  `pred_contribs`) don't have this issue the same way since splits aren't a single linear
+  weight. Takeaway: don't read individual `COMBINED_FEATURE_COLUMNS` coefficients as
+  standalone explanations for the logistic regression model without accounting for their
+  collinear group.
 
 ---
 
