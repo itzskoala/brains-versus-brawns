@@ -11,3 +11,6 @@ uvicorn
 httpx
 gradio
 requests
+beautifulsoup4
+lxml
+playwright

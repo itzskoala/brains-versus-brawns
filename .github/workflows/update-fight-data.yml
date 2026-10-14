@@ -1,0 +1,61 @@
+name: Update fight data from latest UFC event
+
+on:
+  schedule:
+    # Sun/Mon mornings UTC - covers the usual Sat/Sun fight-night cycle.
+    # Safe to run on a quiet week: the pipeline is a no-op (exit 0, no
+    # commit) whenever ufc.com/events has nothing new.
+    - cron: "0 12 * * 0,1"
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install Python dependencies
+        run: pip install -r requirements.txt
+
+      - name: Cache Playwright browsers
+        uses: actions/cache@v4
+        id: playwright-cache
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-chromium-${{ runner.os }}-${{ hashFiles('requirements.txt') }}
+
+      - name: Install Playwright Chromium
+        run: python -m playwright install --with-deps chromium
+
+      - name: Scrape new events + update data/*.csv
+        id: scrape
+        run: python -m src.data.scraping.pipeline
+
+      - name: Check for changes
+        id: changes
+        run: |
+          if git diff --quiet -- data/; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Retrain models on updated data
+        if: steps.changes.outputs.changed == 'true'
+        run: python -m src.models.persistence
+
+      - name: Commit and push
+        if: steps.changes.outputs.changed == 'true'
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add data/*.csv models/*.joblib models/*.json
+          git commit -m "Auto-update: new UFC event results + retrained models"
+          git push
