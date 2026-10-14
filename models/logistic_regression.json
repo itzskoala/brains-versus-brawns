@@ -319,10 +319,10 @@
     "C": 0.01
   },
   "metrics": {
-    "mean_accuracy": 0.6295,
-    "mean_log_loss": 0.6381,
-    "mean_roc_auc": 0.6789,
+    "mean_accuracy": 0.6289,
+    "mean_log_loss": 0.6384,
+    "mean_roc_auc": 0.6783,
     "source": "walk-forward run_backtest, combined(115) feature set, median+indicator imputer, 2026-10-10, hyperparameters preserved from prior artifact"
   },
-  "saved_at": "2026-10-11T02:09:07.923952+00:00"
+  "saved_at": "2026-10-14T23:18:43.897315+00:00"
 }
