@@ -1,35 +1,62 @@
-"""Fighter photos for the matchup screen. Free, no paid API: ufc.com has a
-public athlete-profile page per fighter at a predictable
-/athlete/<first-last> URL, and (confirmed live, 2026-10-14) ufc.com's own
-robots.txt allows /athlete, has no bot-wall (unlike UFCStats - see
-src/data/scraping/ufcstats_browser.py), and redirects a close-but-wrong
-slug to the correct one or, for a fighter with no profile at all, to
-/search - a clean, cheap "do we have a photo for this person" signal with
-no guessing required.
+"""Fighter photos for the matchup screen. Free, no paid API, two sources
+tried in order:
 
-Every resolved URL (including a confirmed "no photo") is cached by
-fighter_id on disk at CACHE_FILE_PATH, not just in memory - loaded once at
-import and appended to on every new lookup, so a fighter is only ever
-looked up on ufc.com ONCE, ever, across every future run and every user of
-this app, not just once per process. See get_fighter_image_url.
+1. ufc.com has a public athlete-profile page per fighter at a predictable
+   /athlete/<first-last> URL, and (confirmed live, 2026-10-14) ufc.com's
+   own robots.txt allows /athlete, has no bot-wall (unlike UFCStats - see
+   src/data/scraping/ufcstats_browser.py), and redirects a close-but-wrong
+   slug to the correct one or, for a fighter with no profile at all, to
+   /search - a clean, cheap "do we have a photo for this person" signal
+   with no guessing required. In production (deployed on shared/datacenter
+   IPs rather than a home connection) ufc.com can be flakier than it was
+   in local testing - likely stricter treatment of cloud IP ranges, same
+   genus of issue as the rate-limiting independently confirmed during
+   development (a plain curl that was ~1s earlier took 64s+ after heavy
+   testing volume). Any failure here - timeout, non-200, no photo - falls
+   through to:
+2. Wikipedia's REST summary API (en.wikipedia.org/api/rest_v1/page/summary/
+   <title>) - explicitly built for and tolerant of automated/bot traffic
+   (see their API etiquette policy; robots.txt has no AI-crawler
+   restriction, unlike e.g. espn.com's explicit site-wide "anthropic-ai:
+   Disallow /"), so it works reliably even where ufc.com doesn't. A plain
+   name lookup can land on an unrelated same-named person (there could be
+   a "Michael Johnson" who isn't our fighter) - handled conservatively:
+   only trust the result when Wikipedia calls it a "standard" (not
+   disambiguation) article AND its own one-line description contains
+   "mixed martial artist". A wrong photo is worse than no photo, so this
+   skips rather than guesses when unsure.
+
+Every resolved URL (including a confirmed "no photo" from BOTH sources) is
+cached by fighter_id on disk at CACHE_FILE_PATH, not just in memory -
+loaded once at import and appended to on every new lookup, so a fighter is
+only ever looked up at most once per source, ever, across every future run
+and every user of this app, not just once per process. See
+get_fighter_image_url.
 
 Most fighters in this dataset (anyone who fought before UFC.com's current
-athlete-database era, or who simply never got a profile page) won't have a
-photo here at all - that's expected, not an error, and handled by falling
-back to a generated initials avatar (fighter_photo_html), never a broken
-image or a crash.
+athlete-database era and has no Wikipedia page either) won't have a photo
+at all - that's expected, not an error, and handled by falling back to a
+generated initials avatar (fighter_photo_html), never a broken image or a
+crash.
 """
 import hashlib
 import html as html_lib
 import json
 import re
+import time
 from pathlib import Path
+from urllib.parse import quote
 
 import requests
 
 ATHLETE_URL = "https://www.ufc.com/athlete/{slug}"
 USER_AGENT = ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
               "(KHTML, like Gecko) Chrome/120.0 Safari/537.36")
+WIKIPEDIA_SUMMARY_URL = "https://en.wikipedia.org/api/rest_v1/page/summary/{title}"
+# Wikipedia's API etiquette explicitly asks for an identifying User-Agent
+# (the opposite of ufc.com's USER_AGENT above, which blends in as a normal
+# browser) - https://www.mediawiki.org/wiki/API:Etiquette.
+WIKIPEDIA_USER_AGENT = "ufc-elo-matchup-predictor/1.0 (personal ML project; contact: kotal008@umn.edu)"
 PHOTO_SIZE_PX = 220
 CACHE_FILE_PATH = Path(__file__).resolve().parent.parent / "data" / "fighter_image_cache.json"
 
@@ -113,25 +140,99 @@ def _parse_og_image(html_text, final_url):
 def fetch_fighter_image_url(fighter_name, session=None):
     """One live ufc.com lookup - no cache, no retry. Returns the photo URL
     or None (not found, no photo, or any network failure - a fighter photo
-    is a nice-to-have, never worth crashing the matchup screen over)."""
+    is a nice-to-have, never worth crashing the matchup screen over).
+    Logs the outcome either way (status/timing/exception) - this is the
+    only observability into production fetch behavior there is, since
+    HF Space logs otherwise only show the startup line."""
     session = session or requests
     slug = _slugify_name(fighter_name)
+    url = ATHLETE_URL.format(slug=slug)
+    t0 = time.monotonic()
     try:
-        resp = session.get(ATHLETE_URL.format(slug=slug), headers={"User-Agent": USER_AGENT}, timeout=15)
-    except requests.RequestException:
+        resp = session.get(url, headers={"User-Agent": USER_AGENT}, timeout=15)
+    except requests.RequestException as exc:
+        print(f"[images] ufc.com FAILED fighter={fighter_name!r} url={url} "
+              f"elapsed={time.monotonic() - t0:.2f}s error={type(exc).__name__}: {exc}")
         return None
+    elapsed = time.monotonic() - t0
     if resp.status_code != 200:
+        print(f"[images] ufc.com non-200 fighter={fighter_name!r} url={url} "
+              f"status={resp.status_code} elapsed={elapsed:.2f}s")
         return None
-    return _parse_og_image(resp.text, resp.url)
+    image_url = _parse_og_image(resp.text, resp.url)
+    print(f"[images] ufc.com OK fighter={fighter_name!r} url={url} final_url={resp.url} "
+          f"status=200 elapsed={elapsed:.2f}s image={'found' if image_url else 'none'}")
+    return image_url
 
 
-def get_fighter_image_url(fighter_id, fighter_name, cache=None, fetch=fetch_fighter_image_url, persist=True):
-    """Cached wrapper around fetch_fighter_image_url - the only entry point
-    the UI should call. `cache` defaults to this module's disk-backed,
-    process-wide dict (shared by every user of this running app, not
-    per-session); tests inject their own in-memory dict and pass
-    persist=False. A fighter with no photo is cached as None too - we never
-    re-request ufc.com for them again, this run or any future one."""
+def _parse_wikipedia_summary(data):
+    """Wikipedia summary JSON -> image URL, or None if this isn't
+    confidently the right person. A plain-name lookup can land on an
+    unrelated same-named person (there could be a non-fighter "Michael
+    Johnson"), so this requires BOTH: a real standalone article (type ==
+    "standard", not "disambiguation" - which is what a conflicted name
+    actually returns, confirmed live for "Michael Johnson") AND the
+    article's own one-line description containing "mixed martial artist"
+    (confirmed present on every real UFC fighter's page checked, e.g.
+    "Australian mixed martial artist (born 1988)" for Volkanovski). A
+    wrong photo is worse than no photo - this skips rather than guesses."""
+    if data.get("type") != "standard":
+        return None
+    description = (data.get("description") or "").lower()
+    if "mixed martial artist" not in description:
+        return None
+    url = (data.get("thumbnail") or {}).get("source")
+    return url if url and url.startswith("http") else None
+
+
+def fetch_fighter_image_url_wikipedia(fighter_name, session=None):
+    """One live Wikipedia lookup - no cache, no retry. Returns the photo
+    URL or None (no matching article, not confidently this person, or any
+    network failure). Logged the same way as fetch_fighter_image_url."""
+    session = session or requests
+    title = quote(fighter_name.strip().replace(" ", "_"))
+    url = WIKIPEDIA_SUMMARY_URL.format(title=title)
+    t0 = time.monotonic()
+    try:
+        resp = session.get(url, headers={"User-Agent": WIKIPEDIA_USER_AGENT}, timeout=15)
+    except requests.RequestException as exc:
+        print(f"[images] wikipedia FAILED fighter={fighter_name!r} url={url} "
+              f"elapsed={time.monotonic() - t0:.2f}s error={type(exc).__name__}: {exc}")
+        return None
+    elapsed = time.monotonic() - t0
+    if resp.status_code != 200:
+        print(f"[images] wikipedia non-200 fighter={fighter_name!r} url={url} "
+              f"status={resp.status_code} elapsed={elapsed:.2f}s")
+        return None
+    try:
+        data = resp.json()
+    except ValueError as exc:
+        print(f"[images] wikipedia bad JSON fighter={fighter_name!r} url={url} error={exc}")
+        return None
+    image_url = _parse_wikipedia_summary(data)
+    print(f"[images] wikipedia OK fighter={fighter_name!r} url={url} status=200 "
+          f"elapsed={elapsed:.2f}s type={data.get('type')} image={'found' if image_url else 'none'}")
+    return image_url
+
+
+def fetch_fighter_image(fighter_name, ufc_session=None, wikipedia_session=None):
+    """The default two-source lookup: ufc.com first (the UFC's own photo),
+    then Wikipedia as a free, bot-tolerant second source for fighters
+    UFC.com has none for (or where UFC.com itself is unreachable - see this
+    module's docstring on production/datacenter-IP flakiness). Returns the
+    first confident match, or None if neither has one."""
+    return (fetch_fighter_image_url(fighter_name, session=ufc_session)
+            or fetch_fighter_image_url_wikipedia(fighter_name, session=wikipedia_session))
+
+
+def get_fighter_image_url(fighter_id, fighter_name, cache=None, fetch=fetch_fighter_image, persist=True):
+    """Cached wrapper around fetch_fighter_image (ufc.com, then Wikipedia) -
+    the only entry point the UI should call. `cache` defaults to this
+    module's disk-backed, process-wide dict (shared by every user of this
+    running app, not per-session); tests inject their own in-memory dict
+    and pass persist=False. A fighter with no photo from either source is
+    cached as None too - we never re-request either site for them again,
+    this run or any future one."""
     cache = _image_url_cache if cache is None else cache
     if fighter_id not in cache:
         cache[fighter_id] = fetch(fighter_name)
@@ -180,11 +281,11 @@ def fighter_loading_html(fighter_name, nickname):
 
 
 def fighter_photo_html(fighter_name, nickname, image_url):
-    """The resolved state: a real ufc.com photo if we found one, otherwise
-    a deterministic initials avatar - never blank. image_url was already
-    confirmed to come from a real 200-status ufc.com page at lookup time
-    (see fetch_fighter_image_url), so this just renders it directly - no
-    client-side onerror fallback juggling a hidden sibling div."""
+    """The resolved state: a real photo (ufc.com or Wikipedia) if we found
+    one, otherwise a deterministic initials avatar - never blank. image_url
+    was already confirmed live at lookup time (see fetch_fighter_image), so
+    this just renders it directly - no client-side onerror fallback
+    juggling a hidden sibling div."""
     name = html_lib.escape(format_fighter_name(fighter_name, nickname))
     if image_url:
         safe_url = html_lib.escape(image_url)

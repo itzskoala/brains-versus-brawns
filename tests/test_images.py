@@ -58,10 +58,16 @@ def test_parse_og_image_malformed_html_does_not_crash():
 
 
 class _FakeResponse:
-    def __init__(self, status_code, text, url):
+    def __init__(self, status_code, text="", url="", json_data=None):
         self.status_code = status_code
         self.text = text
         self.url = url
+        self._json_data = json_data
+
+    def json(self):
+        if self._json_data is None:
+            raise ValueError("no JSON body")
+        return self._json_data
 
 
 class _FakeSession:
@@ -99,6 +105,98 @@ def test_fetch_fighter_image_url_timeout_returns_none_not_raise():
     import requests
     session = _FakeSession(raises=requests.Timeout("too slow"))
     assert img.fetch_fighter_image_url("Someone", session=session) is None
+
+
+# Real Wikipedia REST API response shapes confirmed live on 2026-10-14
+# (en.wikipedia.org/api/rest_v1/page/summary/<title>).
+WIKIPEDIA_VOLKANOVSKI_JSON = {
+    "type": "standard",
+    "title": "Alexander Volkanovski",
+    "description": "Australian mixed martial artist (born 1988)",
+    "thumbnail": {"source": "https://thumb.wikimedia.org/.../Volkanovski.jpeg", "width": 330, "height": 382},
+}
+WIKIPEDIA_DISAMBIGUATION_JSON = {
+    "type": "disambiguation",
+    "title": "Michael Johnson",
+    "description": None,
+}
+WIKIPEDIA_UNRELATED_PERSON_JSON = {
+    "type": "standard",
+    "title": "Someone Else",
+    "description": "American actor (born 1970)",
+    "thumbnail": {"source": "https://thumb.wikimedia.org/.../someone-else.jpeg"},
+}
+WIKIPEDIA_NO_THUMBNAIL_JSON = {
+    "type": "standard",
+    "title": "Obscure Fighter",
+    "description": "American mixed martial artist",
+}
+
+
+def test_parse_wikipedia_summary_real_fighter():
+    url = img._parse_wikipedia_summary(WIKIPEDIA_VOLKANOVSKI_JSON)
+    assert url == "https://thumb.wikimedia.org/.../Volkanovski.jpeg"
+
+
+def test_parse_wikipedia_summary_disambiguation_page_is_not_a_match():
+    # A conflicted name (several notable people share it) - must not guess.
+    assert img._parse_wikipedia_summary(WIKIPEDIA_DISAMBIGUATION_JSON) is None
+
+
+def test_parse_wikipedia_summary_standard_article_but_not_a_fighter_is_not_a_match():
+    # A real, unambiguous article - but about an unrelated same-named
+    # person (no "mixed martial artist" in the description). A wrong photo
+    # is worse than no photo.
+    assert img._parse_wikipedia_summary(WIKIPEDIA_UNRELATED_PERSON_JSON) is None
+
+
+def test_parse_wikipedia_summary_no_thumbnail_is_not_a_match():
+    assert img._parse_wikipedia_summary(WIKIPEDIA_NO_THUMBNAIL_JSON) is None
+
+
+def test_fetch_fighter_image_url_wikipedia_success():
+    session = _FakeSession(_FakeResponse(200, json_data=WIKIPEDIA_VOLKANOVSKI_JSON))
+    url = img.fetch_fighter_image_url_wikipedia("Alexander Volkanovski", session=session)
+    assert url == "https://thumb.wikimedia.org/.../Volkanovski.jpeg"
+    assert session.requested_urls == ["https://en.wikipedia.org/api/rest_v1/page/summary/Alexander_Volkanovski"]
+
+
+def test_fetch_fighter_image_url_wikipedia_404_returns_none():
+    session = _FakeSession(_FakeResponse(404, json_data={"status": 404}))
+    assert img.fetch_fighter_image_url_wikipedia("Nobody At All", session=session) is None
+
+
+def test_fetch_fighter_image_url_wikipedia_network_failure_returns_none_not_raise():
+    import requests
+    session = _FakeSession(raises=requests.Timeout("too slow"))
+    assert img.fetch_fighter_image_url_wikipedia("Someone", session=session) is None
+
+
+def test_fetch_fighter_image_wikipedia_title_encodes_spaces_as_underscores():
+    session = _FakeSession(_FakeResponse(200, json_data=WIKIPEDIA_VOLKANOVSKI_JSON))
+    img.fetch_fighter_image_url_wikipedia("Ian Machado Garry", session=session)
+    assert session.requested_urls == ["https://en.wikipedia.org/api/rest_v1/page/summary/Ian_Machado_Garry"]
+
+
+def test_fetch_fighter_image_tries_ufc_first_and_skips_wikipedia_on_success():
+    ufc_session = _FakeSession(_FakeResponse(200, REAL_ATHLETE_PAGE_HTML, "https://www.ufc.com/athlete/sean-omalley"))
+    wikipedia_session = _FakeSession(_FakeResponse(200, json_data=WIKIPEDIA_VOLKANOVSKI_JSON))
+    url = img.fetch_fighter_image("Sean O'Malley", ufc_session=ufc_session, wikipedia_session=wikipedia_session)
+    assert url == "https://ufc.com/images/2026-06/OMALLEY_SEAN_06-14.png"
+    assert wikipedia_session.requested_urls == []  # never called - ufc.com already answered
+
+
+def test_fetch_fighter_image_falls_back_to_wikipedia_when_ufc_has_no_photo():
+    ufc_session = _FakeSession(_FakeResponse(200, ATHLETE_PAGE_NO_PHOTO_HTML, "https://www.ufc.com/athlete/royce-gracie"))
+    wikipedia_session = _FakeSession(_FakeResponse(200, json_data=WIKIPEDIA_VOLKANOVSKI_JSON))
+    url = img.fetch_fighter_image("Royce Gracie", ufc_session=ufc_session, wikipedia_session=wikipedia_session)
+    assert url == "https://thumb.wikimedia.org/.../Volkanovski.jpeg"
+
+
+def test_fetch_fighter_image_none_when_neither_source_has_a_confident_match():
+    ufc_session = _FakeSession(_FakeResponse(200, ATHLETE_PAGE_NO_PHOTO_HTML, "https://www.ufc.com/athlete/x"))
+    wikipedia_session = _FakeSession(_FakeResponse(200, json_data=WIKIPEDIA_DISAMBIGUATION_JSON))
+    assert img.fetch_fighter_image("Nobody", ufc_session=ufc_session, wikipedia_session=wikipedia_session) is None
 
 
 def test_get_fighter_image_url_caches_after_first_lookup():

@@ -178,14 +178,15 @@ def on_fighter_change(division, fighter_id, other_fighter_id):
     return year_update, gr.update(), gr.update()
 
 
-def on_fighter_photo_change(fighter_id, fighters, other_corner_ready):
+def on_fighter_photo_change(fighter_id, fighters, other_corner_selected):
     """Drives one corner's photo through placeholder -> loading -> resolved
-    (real ufc.com photo or an initials avatar - see frontend/images.py),
-    and the Predict button's enabled state, which requires both corners
-    ready (a fighter picked AND their photo lookup finished - not mid-load)
-    at once. A generator: Gradio streams each yield as its own UI update,
-    so the loading state is genuinely shown while the network call is in
-    flight, not skipped over."""
+    (real ufc.com photo or an initials avatar - see frontend/images.py) and
+    this corner's "selected" state. Predict only needs both corners
+    SELECTED, not their photos resolved - it enables as soon as both
+    fighters are picked, so clicking Predict and the photo fetch run
+    concurrently rather than Predict waiting on the network call. A
+    generator: Gradio streams each yield as its own UI update, so the
+    loading state is genuinely shown while the photo fetch is in flight."""
     if not fighter_id:
         yield images.fighter_placeholder_html(), False, gr.update(interactive=False)
         return
@@ -193,11 +194,12 @@ def on_fighter_photo_change(fighter_id, fighters, other_corner_ready):
     info = next((f for f in fighters if f["fighter_id"] == fighter_id), {})
     name = info.get("fighter_name", fighter_id)
     nickname = info.get("nick_name")
+    predict_interactive = gr.update(interactive=bool(other_corner_selected))
 
-    yield images.fighter_loading_html(name, nickname), False, gr.update(interactive=False)
+    yield images.fighter_loading_html(name, nickname), True, predict_interactive
 
     image_url = images.get_fighter_image_url(fighter_id, name)
-    yield images.fighter_photo_html(name, nickname, image_url), True, gr.update(interactive=bool(other_corner_ready))
+    yield images.fighter_photo_html(name, nickname, image_url), True, predict_interactive
 
 
 def _format_tale_of_the_tape(red_name, red_stats, blue_name, blue_stats, unit="lbs"):
@@ -341,8 +343,11 @@ with gr.Blocks(title="UFC Matchup Predictor") as demo:
     divisions_state = gr.State([])  # raw division names, for relabeling on unit toggle
     fighters_state = gr.State([])  # raw fighter dicts for the current division, for search
     last_result_state = gr.State(None)  # last predict() result, for an instant unit-toggle re-render
-    red_ready_state = gr.State(False)  # a fighter is picked AND their photo lookup has finished
-    blue_ready_state = gr.State(False)
+    # Whether each corner currently has a fighter picked - NOT whether their
+    # photo has finished loading (Predict only waits on selection, so it and
+    # the photo fetch run concurrently - see on_fighter_photo_change).
+    red_selected_state = gr.State(False)
+    blue_selected_state = gr.State(False)
 
     with gr.Row():
         gr.Markdown("# UFC Matchup Predictor", scale=5)
@@ -386,7 +391,7 @@ with gr.Blocks(title="UFC Matchup Predictor") as demo:
     division_dropdown.change(
         on_division_change, inputs=[division_dropdown],
         outputs=[red_fighter, red_year, blue_fighter, blue_year, fighters_state,
-                  red_photo, red_ready_state, blue_photo, blue_ready_state, predict_button])
+                  red_photo, red_selected_state, blue_photo, blue_selected_state, predict_button])
     # A fighter can't face themselves: picking the same fighter already
     # selected in the other corner clears that other corner instead of
     # leaving two identical corners selected - see on_fighter_change.
@@ -405,11 +410,11 @@ with gr.Blocks(title="UFC Matchup Predictor") as demo:
     # corner's photo and the Predict button's enabled state - see
     # on_fighter_photo_change.
     red_fighter.change(
-        on_fighter_photo_change, inputs=[red_fighter, fighters_state, blue_ready_state],
-        outputs=[red_photo, red_ready_state, predict_button])
+        on_fighter_photo_change, inputs=[red_fighter, fighters_state, blue_selected_state],
+        outputs=[red_photo, red_selected_state, predict_button])
     blue_fighter.change(
-        on_fighter_photo_change, inputs=[blue_fighter, fighters_state, red_ready_state],
-        outputs=[blue_photo, blue_ready_state, predict_button])
+        on_fighter_photo_change, inputs=[blue_fighter, fighters_state, red_selected_state],
+        outputs=[blue_photo, blue_selected_state, predict_button])
 
     def on_unit_toggle(unit, divisions, current_division, last_result):
         new_unit = "kg" if unit == "lbs" else "lbs"
