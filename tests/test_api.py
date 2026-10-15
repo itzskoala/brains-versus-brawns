@@ -1,13 +1,117 @@
+import pandas as pd
 import pytest
 from fastapi.testclient import TestClient
 
-from api.main import app
+from api.main import _build_fighter_index, app
 
 
 @pytest.fixture(scope="module")
 def client():
     with TestClient(app) as c:
         yield c
+
+
+def _make_fights(rows):
+    # rows: list of (fight_id, r_id, b_id, weight_class, year)
+    return pd.DataFrame([
+        {"fight_id": fid, "r_fighter_id": r, "b_fighter_id": b, "weight_class": wc,
+         "event_date": pd.Timestamp(f"{year}-01-01")}
+        for fid, r, b, wc, year in rows
+    ])
+
+
+def _make_fighters(rows):
+    # rows: list of (fighter_id, fighter_name, fighter_nick_name, dob)
+    return pd.DataFrame(rows, columns=["fighter_id", "fighter_name", "fighter_nick_name", "dob"])
+
+
+# ---------------------------------------------------------------------------
+# Fighter identity integrity: _build_fighter_index must never let two
+# distinct real fighter_ids collapse into one indistinguishable entry, and
+# must never mix one fighter's divisions/years into another's.
+# ---------------------------------------------------------------------------
+
+def test_build_fighter_index_keeps_distinct_ids_with_same_name_separate():
+    # Real shape, e.g. UFCStats' two distinct "Anthony Figueroa" fighter_ids
+    # (verified against data/fighter.csv) - same name, no DOB on record for
+    # either, so the usual "(b. ...)" disambiguator does nothing.
+    fights = _make_fights([
+        ("f1", "id-a", "opp1", "Bantamweight", 2015),
+        ("f2", "id-b", "opp2", "Featherweight", 2020),
+    ])
+    fighters = _make_fighters([
+        ("id-a", "Same Name", None, None),
+        ("id-b", "Same Name", None, None),
+        ("opp1", "Opponent One", None, None),
+        ("opp2", "Opponent Two", None, None),
+    ])
+
+    index = _build_fighter_index(fights, fighters)
+
+    assert index["id-a"]["display_name"] != index["id-b"]["display_name"]
+    # each still legible as "Same Name", just not identical to one another.
+    assert index["id-a"]["display_name"].startswith("Same Name")
+    assert index["id-b"]["display_name"].startswith("Same Name")
+    # the disambiguator must not bleed into fighter_name/nick_name, which
+    # other code (predict()'s fight-title formatting) reads separately.
+    assert index["id-a"]["fighter_name"] == "Same Name"
+    assert index["id-b"]["fighter_name"] == "Same Name"
+
+
+def test_build_fighter_index_does_not_mix_divisions_or_years_across_same_named_fighters():
+    fights = _make_fights([
+        ("f1", "id-a", "opp1", "Bantamweight", 2015),
+        ("f2", "id-b", "opp2", "Featherweight", 2020),
+    ])
+    fighters = _make_fighters([
+        ("id-a", "Same Name", None, None),
+        ("id-b", "Same Name", None, None),
+        ("opp1", "Opponent One", None, None),
+        ("opp2", "Opponent Two", None, None),
+    ])
+
+    index = _build_fighter_index(fights, fighters)
+
+    assert index["id-a"]["divisions"] == {"Bantamweight"}
+    assert index["id-b"]["divisions"] == {"Featherweight"}
+    assert index["id-a"]["years"] == [2015]
+    assert index["id-b"]["years"] == [2020]
+
+
+def test_build_fighter_index_dob_alone_already_disambiguates_no_extra_suffix_needed():
+    # One has a recorded DOB, the other doesn't - their display_names
+    # already differ ("Name (b. ...)" vs "Name"), so no [id:...] suffix
+    # should be added to either (it would only add noise).
+    fights = _make_fights([
+        ("f1", "id-a", "opp1", "Bantamweight", 2015),
+        ("f2", "id-b", "opp2", "Featherweight", 2020),
+    ])
+    fighters = _make_fighters([
+        ("id-a", "Same Name", None, "1990-01-01"),
+        ("id-b", "Same Name", None, None),
+        ("opp1", "Opponent One", None, None),
+        ("opp2", "Opponent Two", None, None),
+    ])
+
+    index = _build_fighter_index(fights, fighters)
+
+    assert index["id-a"]["display_name"] == "Same Name (b. 1990-01-01)"
+    assert index["id-b"]["display_name"] == "Same Name"
+    assert "[id:" not in index["id-a"]["display_name"]
+    assert "[id:" not in index["id-b"]["display_name"]
+
+
+def test_build_fighter_index_unique_names_are_never_suffixed():
+    fights = _make_fights([("f1", "id-a", "id-b", "Bantamweight", 2015)])
+    fighters = _make_fighters([
+        ("id-a", "Unique Fighter One", None, None),
+        ("id-b", "Unique Fighter Two", None, None),
+    ])
+
+    index = _build_fighter_index(fights, fighters)
+
+    assert index["id-a"]["display_name"] == "Unique Fighter One"
+    assert index["id-b"]["display_name"] == "Unique Fighter Two"
 
 
 def test_divisions_lists_the_eight_main_divisions(client):

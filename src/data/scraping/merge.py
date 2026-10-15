@@ -20,7 +20,17 @@ import pandas as pd
 from src.data.cleaning import clean_fights, clean_rounds
 from src.data.ingestion import build_master_equivalent
 
-FILES = ["event.csv", "fight.csv", "fights.csv", "fight_rounds.csv", "fighter.csv", "fighter_bonus.csv"]
+# event.csv deliberately writes LAST: write_all() iterates this list in
+# order, and a crash/kill between writes is the one way a run could still
+# leave inconsistent state on disk despite per-event validation. With
+# event.csv last, a crash can only ever leave fight/fighter rows on disk
+# for an event that event.csv doesn't list yet - find_missing_events (keyed
+# on event.csv's event_id) still calls that event missing, so the next run
+# retries it; append_new/upsert_fighters are idempotent, so re-scraping it
+# just fills in whatever didn't make it to disk last time. A crash could
+# never produce the opposite (event.csv listing an event whose fights
+# didn't make it to disk), which is the actual danger this guards against.
+FILES = ["fight.csv", "fights.csv", "fight_rounds.csv", "fighter.csv", "fighter_bonus.csv", "event.csv"]
 
 # UFCStats' own "bonuses" text join order (verified against data/fights.csv).
 _BONUS_JOIN_ORDER = ["Fight of the Night", "Knockout of the Night",

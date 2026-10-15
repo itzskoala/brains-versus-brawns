@@ -1,3 +1,6 @@
+import pytest
+import requests
+
 from frontend import gradio as fg
 
 
@@ -75,6 +78,36 @@ def test_format_fighter_name_without_nickname_no_stray_quotes():
 
 def test_format_fighter_name_single_word_name_with_nickname():
     assert fg._format_fighter_name("Shogun", "The Axe Murderer") == 'Shogun "The Axe Murderer"'
+
+
+def test_fighter_dropdown_label_no_disambiguator_is_plain_name():
+    f = {"fighter_id": "x", "fighter_name": "Jon Jones", "nick_name": "Bones", "display_name": "Jon Jones"}
+    assert fg._fighter_dropdown_label(f) == 'Jon "Bones" Jones'
+
+
+def test_fighter_dropdown_label_carries_over_dob_suffix():
+    f = {"fighter_id": "x", "fighter_name": "Michael McDonald", "nick_name": None,
+         "display_name": "Michael McDonald (b. 1991-01-15)"}
+    assert fg._fighter_dropdown_label(f) == "Michael McDonald (b. 1991-01-15)"
+
+
+def test_fighter_dropdown_label_carries_over_fighter_id_suffix():
+    # api/main.py's _build_fighter_index appends a "[id:...]" suffix when
+    # two distinct fighter_ids share a name AND have no DOB to tell them
+    # apart (see test_api.py's fighter-identity-integrity tests) - this
+    # picker label must surface that disambiguator too, not just the
+    # dob-shaped one, or the dropdown would still show two
+    # indistinguishable "Same Name" entries despite the API already having
+    # fixed the ambiguity.
+    f = {"fighter_id": "daff32bc", "fighter_name": "Anthony Figueroa", "nick_name": None,
+         "display_name": "Anthony Figueroa [id:daff32bc]"}
+    assert fg._fighter_dropdown_label(f) == "Anthony Figueroa [id:daff32bc]"
+
+
+def test_fighter_dropdown_label_carries_over_combined_dob_and_id_suffix():
+    f = {"fighter_id": "x", "fighter_name": "Same Name", "nick_name": "Nick",
+         "display_name": "Same Name (b. 1990-01-01) [id:abcd1234]"}
+    assert fg._fighter_dropdown_label(f) == 'Same "Nick" Name (b. 1990-01-01) [id:abcd1234]'
 
 
 # Real data: data/fighter.csv has Sean O'Malley and Rashad Evans both with
@@ -181,3 +214,174 @@ def test_format_tale_of_the_tape_no_caveat_when_both_corners_established():
     blue = _make_stats(prior_fights=20, prior_wins=15)
     tape = fg._format_tale_of_the_tape("Red Fighter", red, "Blue Fighter", blue)
     assert "⚠️" not in tape
+
+
+class _FakeResponse:
+    """Stands in for a requests.Response - json_raises=True simulates a
+    non-JSON body (a proxy error page, a plain-text 500/502), which is
+    exactly what crashed predict()'s old unconditional resp.json() call in
+    production."""
+
+    def __init__(self, status_code=200, json_data=None, text="", json_raises=False):
+        self.status_code = status_code
+        self._json_data = json_data
+        self.text = text
+        self._json_raises = json_raises
+
+    def json(self):
+        if self._json_raises:
+            raise requests.exceptions.JSONDecodeError("Expecting value", "", 0)
+        return self._json_data
+
+
+# ---------------------------------------------------------------------------
+# Issue 3: non-JSON and unsuccessful API responses must not raise a raw
+# requests/JSON exception out of _get()/predict() - see _response_error_
+# detail and _get.
+# ---------------------------------------------------------------------------
+
+def test_response_error_detail_prefers_json_detail_key():
+    resp = _FakeResponse(status_code=400, json_data={"detail": "fighter not found"})
+    assert fg._response_error_detail(resp) == "fighter not found"
+
+
+def test_response_error_detail_falls_back_to_raw_text_when_not_json():
+    resp = _FakeResponse(status_code=502, text="<html>Bad Gateway</html>", json_raises=True)
+    assert fg._response_error_detail(resp) == "<html>Bad Gateway</html>"
+
+
+def test_response_error_detail_blank_non_json_body_falls_back_to_status():
+    resp = _FakeResponse(status_code=500, text="", json_raises=True)
+    assert fg._response_error_detail(resp) == "HTTP 500"
+
+
+def test_get_raises_gr_error_not_raw_exception_on_connection_failure(monkeypatch):
+    def _boom(*a, **k):
+        raise requests.exceptions.ConnectionError("connection refused")
+    monkeypatch.setattr(requests, "get", _boom)
+    with pytest.raises(fg.gr.Error):
+        fg._get("/models")
+
+
+def test_get_raises_gr_error_on_non_200_status(monkeypatch):
+    monkeypatch.setattr(requests, "get", lambda *a, **k: _FakeResponse(
+        status_code=500, json_raises=True, text="Internal Server Error"))
+    with pytest.raises(fg.gr.Error):
+        fg._get("/models")
+
+
+def test_get_raises_gr_error_on_non_json_200_response(monkeypatch):
+    # The real production trigger: the API said 200 but the body isn't
+    # JSON at all - resp.json() must not be allowed to raise uncaught.
+    monkeypatch.setattr(requests, "get", lambda *a, **k: _FakeResponse(
+        status_code=200, json_raises=True, text="not json"))
+    with pytest.raises(fg.gr.Error):
+        fg._get("/models")
+
+
+def test_get_returns_json_on_success(monkeypatch):
+    monkeypatch.setattr(requests, "get", lambda *a, **k: _FakeResponse(
+        status_code=200, json_data=[{"id": "m1"}]))
+    assert fg._get("/models") == [{"id": "m1"}]
+
+
+# ---------------------------------------------------------------------------
+# Issue 1 (+4): dropdowns whose real choices only exist once a later event
+# populates them must allow a stale/custom value through rather than have
+# Gradio's own Dropdown.preprocess() hard-raise on it - see the comment
+# above model_dropdown/division_dropdown/red_fighter/blue_fighter.
+# ---------------------------------------------------------------------------
+
+def test_dynamic_dropdowns_allow_custom_value_so_gradio_never_hard_raises():
+    assert fg.model_dropdown.allow_custom_value is True
+    assert fg.division_dropdown.allow_custom_value is True
+    assert fg.red_fighter.allow_custom_value is True
+    assert fg.blue_fighter.allow_custom_value is True
+
+
+_FIGHTERS = [
+    {"fighter_id": "r1", "fighter_name": "Red Fighter", "nick_name": None, "years": [2020, 2021]},
+    {"fighter_id": "b1", "fighter_name": "Blue Fighter", "nick_name": None, "years": [2021]},
+]
+
+
+def test_on_fighter_change_invalid_selection_does_not_crash(monkeypatch):
+    # The value a Dropdown.preprocess() would otherwise have rejected
+    # outright (empty choices, or a value from a stale/other division)
+    # now reaches this handler - it must fall back cleanly instead of
+    # next()-with-no-default raising StopIteration.
+    monkeypatch.setattr(fg, "_fighter_choices", lambda division: ([], []))
+    year_update, other_fighter_update, other_year_update = fg.on_fighter_change("ping", "ping", None)
+    assert year_update["choices"] == [fg.NO_YEAR_CHOICE]
+    assert year_update["value"] == fg.NO_YEAR_CHOICE
+
+
+def test_on_fighter_change_valid_selection_still_populates_years(monkeypatch):
+    monkeypatch.setattr(fg, "_fighter_choices", lambda division: ([], _FIGHTERS))
+    year_update, other_fighter_update, other_year_update = fg.on_fighter_change("Lightweight", "r1", None)
+    assert year_update["choices"] == [fg.NO_YEAR_CHOICE, "2020", "2021"]
+
+
+def test_on_fighter_change_blank_fighter_id_short_circuits_without_a_lookup(monkeypatch):
+    def _boom(division):
+        raise AssertionError("must not call the API when no fighter is selected")
+    monkeypatch.setattr(fg, "_fighter_choices", _boom)
+    year_update, _other, _other_year = fg.on_fighter_change("Lightweight", None, None)
+    assert year_update["value"] == fg.NO_YEAR_CHOICE
+
+
+# ---------------------------------------------------------------------------
+# Issue 2/3 combined, from predict()'s point of view: an invalid selection
+# must be rejected before ever calling the API, and a failed/malformed API
+# call must come back as a clean error string, never a crash.
+# ---------------------------------------------------------------------------
+
+def test_predict_rejects_fighter_id_not_in_current_choices_without_calling_api(monkeypatch):
+    monkeypatch.setattr(fg, "_fighter_choices", lambda division: ([], []))
+
+    def _boom(*a, **k):
+        raise AssertionError("predict() must not call the API for an invalid selection")
+    monkeypatch.setattr(requests, "post", _boom)
+
+    headline, tape, history, last_result = fg.predict("m1", "ping", "ping", None, "ping", None)
+    assert headline.startswith("Error:")
+    assert last_result is None
+
+
+def test_predict_handles_connection_error_gracefully(monkeypatch):
+    monkeypatch.setattr(fg, "_fighter_choices", lambda division: ([], _FIGHTERS))
+
+    def _boom(*a, **k):
+        raise requests.exceptions.ConnectionError("down")
+    monkeypatch.setattr(requests, "post", _boom)
+
+    headline, *_rest = fg.predict("m1", "Lightweight", "r1", None, "b1", None)
+    assert headline.startswith("Error:")
+
+
+def test_predict_handles_non_json_error_response_gracefully(monkeypatch):
+    # The exact reported crash: resp.json() on a non-JSON error body.
+    monkeypatch.setattr(fg, "_fighter_choices", lambda division: ([], _FIGHTERS))
+    monkeypatch.setattr(requests, "post", lambda *a, **k: _FakeResponse(
+        status_code=502, text="<html>Bad Gateway</html>", json_raises=True))
+
+    headline, *_rest = fg.predict("m1", "Lightweight", "r1", None, "b1", None)
+    assert headline == "Error: <html>Bad Gateway</html>"
+
+
+def test_predict_handles_non_json_200_response_gracefully(monkeypatch):
+    monkeypatch.setattr(fg, "_fighter_choices", lambda division: ([], _FIGHTERS))
+    monkeypatch.setattr(requests, "post", lambda *a, **k: _FakeResponse(
+        status_code=200, json_raises=True, text="not json"))
+
+    headline, *_rest = fg.predict("m1", "Lightweight", "r1", None, "b1", None)
+    assert headline.startswith("Error:")
+
+
+def test_predict_surfaces_json_detail_from_a_400_response(monkeypatch):
+    monkeypatch.setattr(fg, "_fighter_choices", lambda division: ([], _FIGHTERS))
+    monkeypatch.setattr(requests, "post", lambda *a, **k: _FakeResponse(
+        status_code=400, json_data={"detail": "fighter r1 has no fight history"}))
+
+    headline, *_rest = fg.predict("m1", "Lightweight", "r1", None, "b1", None)
+    assert headline == "Error: fighter r1 has no fight history"

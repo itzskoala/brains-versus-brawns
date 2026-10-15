@@ -27,8 +27,18 @@ DECISION_LABELS = {"decision_unanimous", "decision_split", "decision_majority", 
 def parse_height_to_inches(series):
     """Convert a height column stored as text like 5' 10" into inches.
     Shared by clean_fights and src.features.snapshot, which both need to
-    turn fighter.csv's raw height string into the same numeric form."""
-    feet_inches = series.str.extract(r"(\d+)'\s*(\d+)")
+    turn fighter.csv's raw height string into the same numeric form.
+
+    astype(object) first: a full fighter.csv column of heights is always
+    object dtype (a real mix of strings and NaN), so .str works directly -
+    but src.features.snapshot builds a single-fighter Series via
+    pd.Series([row["height"]]), and when that one value is NaN, pandas
+    infers float64 dtype (no string in the list to force object), which
+    has no .str accessor at all and raises AttributeError instead of
+    returning NaN - this broke every fighter with no recorded height
+    (~8% of fighter.csv) with a 500 rather than the documented
+    fall-back-to-median behavior."""
+    feet_inches = series.astype(object).str.extract(r"(\d+)'\s*(\d+)")
     feet = pd.to_numeric(feet_inches[0])
     inches = pd.to_numeric(feet_inches[1])
     return feet * 12 + inches

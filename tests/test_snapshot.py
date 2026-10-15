@@ -107,6 +107,39 @@ def test_build_fighter_snapshot_raises_for_unknown_fighter(fights, fighters_df):
                                 weight_class="Lightweight")
 
 
+def test_build_fighter_snapshot_handles_fighter_with_no_recorded_bio_data():
+    # Regression test: a fighter whose UFCStats profile was never fully
+    # populated (height/weight/reach/stance/dob all blank - ~8% of real
+    # fighter.csv rows, e.g. old/sparse records like a one-off prelim
+    # fighter) used to crash build_fighter_snapshot with
+    # "AttributeError: Can only use .str accessor with string values, not
+    # floating". The cause: pd.Series([row["height"]]) with a single NaN
+    # value infers float64 dtype (no string in the list to force object),
+    # which has no .str accessor at all - unlike a full fighter.csv column
+    # (always object dtype, a real mix of strings and NaN). This is exactly
+    # what happened selecting the real "Adam Steele" fighter (blank
+    # fighter.csv row) against Islam Makhachev in the Welterweight
+    # division - the /predict and tale-of-the-tape endpoints 500'd instead
+    # of falling back to the documented median/"Unknown" behavior
+    # _static_attributes already has for every OTHER missing-field case.
+    fights = pd.DataFrame([make_fight("f1", "2008-01-01", "A", "sparse", "A")])
+    fighters_df = make_fighters_df([
+        ("A", "5' 11\"", 170.0, 72.0, "Orthodox", "1990-01-01"),
+        ("sparse", None, None, None, None, None),  # Adam Steele's real shape
+    ])
+
+    snapshot = build_fighter_snapshot(fights, fighters_df, "sparse", pd.Timestamp("2008-01-01"),
+                                       weight_class="Welterweight")
+
+    # falls back to the training-set median (computed from fights["r_height"],
+    # which is 70 for every row in the fights fixture here), not a crash.
+    assert snapshot["height"] == 70
+    assert snapshot["weight_lbs"] == 170  # median fallback, from fights["r_weight_lbs"]
+    assert snapshot["reach_inches"] == 70  # median fallback, from fights["r_reach_inches"]
+    assert snapshot["stance"] == "Unknown"
+    assert pd.isna(snapshot["age"])  # no dob to compute age from - stays missing, not fabricated
+
+
 def test_build_matchup_features_diff_and_overrides():
     red = {"age": 30.0, "prior_fights": 5, "stance": "Orthodox", "reach_inches": 74.0}
     blue = {"age": 28.0, "prior_fights": 2, "stance": "Southpaw", "reach_inches": 70.0}

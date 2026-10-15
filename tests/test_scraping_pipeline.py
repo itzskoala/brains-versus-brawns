@@ -1,7 +1,8 @@
 import pandas as pd
 import pytest
 
-from src.data.scraping import merge, pipeline, ufc_com
+from src.data.scraping import merge, pipeline
+from src.data.scraping.ufcstats_browser import UfcStatsFetchError
 from src.features.engineering import FIGHT_STAT_COLUMNS
 
 COMPLETED_EVENTS_URL = pipeline.COMPLETED_EVENTS_URL
@@ -9,8 +10,11 @@ COMPLETED_EVENTS_URL = pipeline.COMPLETED_EVENTS_URL
 
 class FakeBrowser:
     """Stands in for UfcStatsBrowser in tests - no Playwright, no network.
-    `pages` maps URL -> HTML string; requesting any other URL is a test
-    bug, not a silently-wrong result, so it raises loudly."""
+    `pages` maps URL -> HTML string, or URL -> a list of responses popped
+    one per call (an item that's an Exception instance is raised instead
+    of returned, for simulating a flaky fetch that succeeds on a later
+    attempt). Requesting a URL with nothing left to give is a test bug,
+    not a silently-wrong result, so it raises loudly."""
 
     def __init__(self, pages):
         self.pages = pages
@@ -26,7 +30,15 @@ class FakeBrowser:
         self.requested.append(url)
         if url not in self.pages:
             raise AssertionError(f"test fixture has no canned page for {url}")
-        return self.pages[url]
+        value = self.pages[url]
+        if isinstance(value, list):
+            if not value:
+                raise AssertionError(f"test fixture ran out of canned responses for {url}")
+            item = value.pop(0)
+            if isinstance(item, Exception):
+                raise item
+            return item
+        return value
 
 
 def _write_minimal_existing_data(data_dir):
@@ -78,27 +90,11 @@ def data_dir(tmp_path):
     return tmp_path
 
 
-def test_find_missing_events_filters_by_date_not_name(data_dir, monkeypatch):
-    # ufc.com and UFCStats format the same event's name differently - date
-    # is the only safe join key (see pipeline.find_missing_events).
-    monkeypatch.setattr(ufc_com, "get_past_events", lambda: [
-        {"name": "Old Show, Different Headline Text", "date": pd.Timestamp("2026-08-01").date()},
-        {"name": "New Show", "date": pd.Timestamp("2026-09-01").date()},
-    ])
-    missing = pipeline.find_missing_events(str(data_dir))
-    assert [e["name"] for e in missing] == ["New Show"]
-
-
-def test_find_missing_events_sorted_oldest_first(data_dir, monkeypatch):
-    monkeypatch.setattr(ufc_com, "get_past_events", lambda: [
-        {"name": "Newer", "date": pd.Timestamp("2026-09-08").date()},
-        {"name": "Older", "date": pd.Timestamp("2026-09-01").date()},
-    ])
-    missing = pipeline.find_missing_events(str(data_dir))
-    assert [e["name"] for e in missing] == ["Older", "Newer"]
-
-
 def _completed_events_page(rows):
+    """rows=[] renders a table with zero data rows - the shape UFCStats'
+    own "ran past the last page" response takes, which parse_completed_
+    events_list turns into a ParseError and discover_all_events reads as
+    "pagination is done"."""
     trs = "\n".join(f"""
       <tr class="b-statistics__table-row">
         <td class="b-statistics__table-col"><i class="b-statistics__table-content">
@@ -107,35 +103,6 @@ def _completed_events_page(rows):
         <td class="b-statistics__table-col">Las Vegas, Nevada, USA</td>
       </tr>""" for eid, name, date in rows)
     return f'<table class="b-statistics__table-events">{trs}</table>'
-
-
-def test_find_ufcstats_event_found_on_first_page():
-    html = _completed_events_page([("abc123", "UFC Fight Night: New Show", "September 01, 2026")])
-    browser = FakeBrowser({COMPLETED_EVENTS_URL: html})
-    match = pipeline.find_ufcstats_event(browser, "New Show", pd.Timestamp("2026-09-01").date())
-    assert match["event_id"] == "abc123"
-
-
-def test_find_ufcstats_event_paginates_to_find_older_event():
-    page1 = _completed_events_page([("recent", "UFC Fight Night: Recent", "October 10, 2026")])
-    page2 = _completed_events_page([("older", "UFC Fight Night: Older Show", "September 01, 2026")])
-    browser = FakeBrowser({
-        COMPLETED_EVENTS_URL: page1,
-        f"{COMPLETED_EVENTS_URL}?page=2": page2,
-    })
-    match = pipeline.find_ufcstats_event(browser, "Older Show", pd.Timestamp("2026-09-01").date())
-    assert match["event_id"] == "older"
-    assert browser.requested == [COMPLETED_EVENTS_URL, f"{COMPLETED_EVENTS_URL}?page=2"]
-
-
-def test_find_ufcstats_event_stops_once_pages_go_older_than_target():
-    # oldest row on page 1 is already older than the target date -> no
-    # point fetching page 2 at all.
-    page1 = _completed_events_page([("only", "UFC Fight Night: Only", "January 01, 2020")])
-    browser = FakeBrowser({COMPLETED_EVENTS_URL: page1})
-    match = pipeline.find_ufcstats_event(browser, "Not There", pd.Timestamp("2026-09-01").date())
-    assert match is None
-    assert browser.requested == [COMPLETED_EVENTS_URL]
 
 
 def _event_page(event_name, date, location, fight_id):
@@ -206,42 +173,138 @@ def _fighter_page_html(name):
     """
 
 
-EVENT_URL = "http://ufcstats.com/event-details/new1"
-FIGHT_URL = "http://ufcstats.com/fight-details/fnew1"
-R1_URL = "http://ufcstats.com/fighter-details/r1"
-B1_URL = "http://ufcstats.com/fighter-details/b1"
+EMPTY_PAGE = _completed_events_page([])
 
 
-def _full_pages():
+# ---------------------------------------------------------------------------
+# discover_all_events: exhaustive pagination, no rolling-window cutoff
+# ---------------------------------------------------------------------------
+
+def test_discover_all_events_paginates_across_multiple_pages():
+    page1 = _completed_events_page([("recent", "UFC Fight Night: Recent", "October 10, 2026")])
+    page2 = _completed_events_page([("older", "UFC Fight Night: Older", "September 01, 2026")])
+    page3 = _completed_events_page([("oldest", "UFC 1", "November 12, 1993")])
+    browser = FakeBrowser({
+        COMPLETED_EVENTS_URL: page1,
+        f"{COMPLETED_EVENTS_URL}?page=2": page2,
+        f"{COMPLETED_EVENTS_URL}?page=3": page3,
+        f"{COMPLETED_EVENTS_URL}?page=4": EMPTY_PAGE,
+    })
+    events = pipeline.discover_all_events(browser)
+    assert set(events) == {"recent", "older", "oldest"}
+    assert browser.requested == [COMPLETED_EVENTS_URL, f"{COMPLETED_EVENTS_URL}?page=2",
+                                  f"{COMPLETED_EVENTS_URL}?page=3", f"{COMPLETED_EVENTS_URL}?page=4"]
+
+
+def test_discover_all_events_does_not_stop_at_an_old_date():
+    # The whole point of exhaustive discovery: a much-older event on a
+    # later page must still be collected, unlike a "stop once we're past
+    # some cutoff" heuristic would.
+    page1 = _completed_events_page([("recent", "UFC Fight Night: Recent", "October 10, 2026")])
+    page2 = _completed_events_page([("ancient", "UFC 1", "November 12, 1993")])
+    browser = FakeBrowser({
+        COMPLETED_EVENTS_URL: page1,
+        f"{COMPLETED_EVENTS_URL}?page=2": page2,
+        f"{COMPLETED_EVENTS_URL}?page=3": EMPTY_PAGE,
+    })
+    events = pipeline.discover_all_events(browser)
+    assert "ancient" in events
+
+
+def test_discover_all_events_raises_if_pagination_never_terminates():
+    # Every page looks non-empty forever - the "ran out" stop condition
+    # never fires. That's a bug in the stop condition (or a markup
+    # change), not a real 800-event-deep catalog, so this must raise
+    # loudly rather than silently truncating or looping forever.
+    browser = FakeBrowser({
+        COMPLETED_EVENTS_URL: _completed_events_page([("e1", "Show", "October 10, 2026")]),
+        **{f"{COMPLETED_EVENTS_URL}?page={n}": _completed_events_page([(f"e{n}", "Show", "October 10, 2026")])
+           for n in range(2, 10)},
+    })
+    with pytest.raises(pipeline.PipelineError):
+        pipeline.discover_all_events(browser, max_pages=5)
+
+
+def test_discover_all_events_retries_transient_fetch_failures():
+    browser = FakeBrowser({
+        COMPLETED_EVENTS_URL: [UfcStatsFetchError("timeout"),
+                                _completed_events_page([("e1", "Show", "October 10, 2026")])],
+        f"{COMPLETED_EVENTS_URL}?page=2": EMPTY_PAGE,
+    })
+    events = pipeline.discover_all_events(browser)
+    assert set(events) == {"e1"}
+
+
+def test_discover_all_events_gives_up_after_exhausting_retries():
+    browser = FakeBrowser({
+        COMPLETED_EVENTS_URL: [UfcStatsFetchError("down"), UfcStatsFetchError("down"),
+                                UfcStatsFetchError("still down")],
+    })
+    with pytest.raises(UfcStatsFetchError):
+        pipeline.discover_all_events(browser)
+
+
+# ---------------------------------------------------------------------------
+# find_missing_events: diff by event_id, not name/date
+# ---------------------------------------------------------------------------
+
+def test_find_missing_events_diffs_by_event_id(data_dir):
+    discovered = {
+        "e0": {"event_id": "e0", "event_name": "Totally different headline for the same show",
+               "event_date": pd.Timestamp("2026-08-01").date(), "location": "Las Vegas, Nevada, USA"},
+        "new1": {"event_id": "new1", "event_name": "New Show",
+                 "event_date": pd.Timestamp("2026-09-01").date(), "location": "Las Vegas, Nevada, USA"},
+    }
+    missing = pipeline.find_missing_events(discovered, str(data_dir))
+    assert [e["event_id"] for e in missing] == ["new1"]
+
+
+def test_find_missing_events_sorted_oldest_first(data_dir):
+    discovered = {
+        "newer": {"event_id": "newer", "event_name": "Newer",
+                  "event_date": pd.Timestamp("2026-09-08").date(), "location": "x"},
+        "older": {"event_id": "older", "event_name": "Older",
+                  "event_date": pd.Timestamp("2026-09-01").date(), "location": "x"},
+    }
+    missing = pipeline.find_missing_events(discovered, str(data_dir))
+    assert [e["event_id"] for e in missing] == ["older", "newer"]
+
+
+# ---------------------------------------------------------------------------
+# run(): per-event atomic processing, duplicate prevention, idempotency
+# ---------------------------------------------------------------------------
+
+def _full_pages(event_id="new1", name="UFC Fight Night: New Show", date="September 01, 2026",
+                 fight_id="fnew1"):
+    event_url = f"http://ufcstats.com/event-details/{event_id}"
+    fight_url = f"http://ufcstats.com/fight-details/{fight_id}"
     return {
-        COMPLETED_EVENTS_URL: _completed_events_page(
-            [("new1", "UFC Fight Night: New Show", "September 01, 2026")]),
-        EVENT_URL: _event_page("UFC Fight Night: New Show", "September 01, 2026",
-                                "Las Vegas, Nevada, USA", "fnew1"),
-        FIGHT_URL: _fight_page_html(),
-        R1_URL: _fighter_page_html("Red Fighter"),
-        B1_URL: _fighter_page_html("Blue Fighter"),
+        COMPLETED_EVENTS_URL: _completed_events_page([(event_id, name, date)]),
+        f"{COMPLETED_EVENTS_URL}?page=2": EMPTY_PAGE,
+        event_url: _event_page(name, date, "Las Vegas, Nevada, USA", fight_id),
+        fight_url: _fight_page_html(),
+        "http://ufcstats.com/fighter-details/r1": _fighter_page_html("Red Fighter"),
+        "http://ufcstats.com/fighter-details/b1": _fighter_page_html("Blue Fighter"),
     }
 
 
-def test_run_writes_new_data_on_success(data_dir, monkeypatch):
-    monkeypatch.setattr(ufc_com, "get_past_events", lambda: [
-        {"name": "New Show", "date": pd.Timestamp("2026-09-01").date()}])
+def test_run_writes_new_event(data_dir, monkeypatch):
     monkeypatch.setattr(pipeline, "UfcStatsBrowser", lambda: FakeBrowser(_full_pages()))
 
     result = pipeline.run(data_dir=str(data_dir), dry_run=False)
 
     assert result["status"] == "written"
-    assert result["fights"] == 1
+    assert result["added"] == 1
+    assert result["failed"] == 0
     fights = pd.read_csv(data_dir / "fights.csv")
     assert "fnew1" in set(fights["fight_id"])
+    events = pd.read_csv(data_dir / "event.csv")
+    assert "new1" in set(events["event_id"])
     fighters = pd.read_csv(data_dir / "fighter.csv")
     assert {"r1", "b1"}.issubset(set(fighters["fighter_id"]))
 
 
 def test_run_dry_run_does_not_write(data_dir, monkeypatch):
-    monkeypatch.setattr(ufc_com, "get_past_events", lambda: [
-        {"name": "New Show", "date": pd.Timestamp("2026-09-01").date()}])
     monkeypatch.setattr(pipeline, "UfcStatsBrowser", lambda: FakeBrowser(_full_pages()))
 
     before = (data_dir / "fights.csv").read_text()
@@ -251,65 +314,130 @@ def test_run_dry_run_does_not_write(data_dir, monkeypatch):
     assert (data_dir / "fights.csv").read_text() == before
 
 
-def test_run_no_new_events(data_dir, monkeypatch):
-    monkeypatch.setattr(ufc_com, "get_past_events", lambda: [
-        {"name": "Old Show", "date": pd.Timestamp("2026-08-01").date()}])
-
-    def _boom():
-        raise AssertionError("should never touch UFCStats when nothing is missing")
-    monkeypatch.setattr(pipeline, "UfcStatsBrowser", _boom)
-
-    result = pipeline.run(data_dir=str(data_dir), dry_run=False)
-    assert result["status"] == "no_new_events"
-
-
-def test_run_skips_event_not_yet_posted_on_ufcstats(data_dir, monkeypatch):
-    # ufc.com shows it as done, but UFCStats hasn't posted results yet -
-    # everything UFCStats does have is still older than our target date,
-    # so find_ufcstats_event's early-stop kicks in and returns None. Must
-    # be skipped (retried next run), not fail the whole pipeline.
-    monkeypatch.setattr(ufc_com, "get_past_events", lambda: [
-        {"name": "Not On UFCStats Yet", "date": pd.Timestamp("2026-09-01").date()}])
-    monkeypatch.setattr(pipeline, "UfcStatsBrowser", lambda: FakeBrowser({
-        COMPLETED_EVENTS_URL: _completed_events_page(
-            [("older", "UFC Fight Night: Older", "August 25, 2026")]),
-    }))
-
-    result = pipeline.run(data_dir=str(data_dir), dry_run=False)
-    assert result["status"] == "no_new_events"
-
-
-def test_run_aborts_and_writes_nothing_on_malformed_fight_page(data_dir, monkeypatch):
-    monkeypatch.setattr(ufc_com, "get_past_events", lambda: [
-        {"name": "New Show", "date": pd.Timestamp("2026-09-01").date()}])
-    pages = _full_pages()
-    pages[FIGHT_URL] = "<html><body>not a real fight page</body></html>"
+def test_run_no_new_events_when_nothing_missing(data_dir, monkeypatch):
+    pages = {
+        COMPLETED_EVENTS_URL: _completed_events_page([("e0", "UFC Fight Night: Old", "August 01, 2026")]),
+        f"{COMPLETED_EVENTS_URL}?page=2": EMPTY_PAGE,
+    }
     monkeypatch.setattr(pipeline, "UfcStatsBrowser", lambda: FakeBrowser(pages))
 
-    before = (data_dir / "fights.csv").read_text()
-    with pytest.raises(pipeline.PipelineError):
-        pipeline.run(data_dir=str(data_dir), dry_run=False)
-
-    assert (data_dir / "fights.csv").read_text() == before
+    result = pipeline.run(data_dir=str(data_dir), dry_run=False)
+    assert result["status"] == "no_new_events"
+    assert result["missing"] == 0
 
 
-def test_run_aborts_and_writes_nothing_on_validation_failure(data_dir, monkeypatch):
-    # Parses fine, but would fail validate_new_data (fight already exists
-    # under a different fight_id than f0 but reuses an existing fighter_id
-    # inconsistently is hard to trigger here cleanly - instead simulate by
-    # making the fight page claim a corner fighter_id with no fighter page
-    # available, which scrape_event would still try to fetch - so this
-    # checks the simpler, directly-triggerable case: an orphaned fighter
-    # reference slipping past parsing is caught by the validation gate).
-    monkeypatch.setattr(ufc_com, "get_past_events", lambda: [
-        {"name": "New Show", "date": pd.Timestamp("2026-09-01").date()}])
+def test_run_rediscovering_an_event_already_written_adds_nothing(data_dir, monkeypatch):
+    # Idempotency/duplicate-prevention: running twice against the same
+    # discovered catalog must not duplicate rows the second time.
+    monkeypatch.setattr(pipeline, "UfcStatsBrowser", lambda: FakeBrowser(_full_pages()))
+    first = pipeline.run(data_dir=str(data_dir), dry_run=False)
+    assert first["added"] == 1
+
+    monkeypatch.setattr(pipeline, "UfcStatsBrowser", lambda: FakeBrowser(_full_pages()))
+    second = pipeline.run(data_dir=str(data_dir), dry_run=False)
+    assert second["status"] == "no_new_events"
+
+    fights = pd.read_csv(data_dir / "fights.csv")
+    assert list(fights["fight_id"]).count("fnew1") == 1
+
+
+def test_run_one_bad_event_does_not_block_or_undo_a_good_one(data_dir, monkeypatch):
+    # The core resilience property: events are processed and persisted one
+    # at a time. A malformed fight page on event B must not roll back
+    # event A, which already scraped and validated cleanly.
+    good = _full_pages(event_id="good1", name="UFC Fight Night: Good", date="August 15, 2026",
+                        fight_id="fgood1")
+    bad = _full_pages(event_id="bad1", name="UFC Fight Night: Bad", date="August 22, 2026",
+                       fight_id="fbad1")
+    pages = {**good, **bad}
+    pages[COMPLETED_EVENTS_URL] = _completed_events_page([
+        ("good1", "UFC Fight Night: Good", "August 15, 2026"),
+        ("bad1", "UFC Fight Night: Bad", "August 22, 2026"),
+    ])
+    pages[f"{COMPLETED_EVENTS_URL}?page=2"] = EMPTY_PAGE
+    pages["http://ufcstats.com/fight-details/fbad1"] = "<html><body>not a real fight page</body></html>"
+    monkeypatch.setattr(pipeline, "UfcStatsBrowser", lambda: FakeBrowser(pages))
+
+    result = pipeline.run(data_dir=str(data_dir), dry_run=False)
+
+    assert result["added"] == 1
+    assert result["failed"] == 1
+    assert result["failed_events"][0]["event_id"] == "bad1"
+
+    events = pd.read_csv(data_dir / "event.csv")
+    fights = pd.read_csv(data_dir / "fights.csv")
+    assert "good1" in set(events["event_id"])
+    assert "fgood1" in set(fights["fight_id"])
+    # the bad event must be entirely absent - never partially written
+    assert "bad1" not in set(events["event_id"])
+    assert "fbad1" not in set(fights["fight_id"])
+
+
+def test_run_incomplete_event_is_retried_next_run_not_marked_done(data_dir, monkeypatch):
+    # An event that fails this run must still show up as "missing" next
+    # run (no event.csv row, no half-written fight rows to collide with).
+    bad_pages = _full_pages(event_id="bad1", name="UFC Fight Night: Bad", date="August 22, 2026",
+                             fight_id="fbad1")
+    bad_pages["http://ufcstats.com/fight-details/fbad1"] = "<html><body>broken</body></html>"
+    monkeypatch.setattr(pipeline, "UfcStatsBrowser", lambda: FakeBrowser(bad_pages))
+    first = pipeline.run(data_dir=str(data_dir), dry_run=False)
+    assert first["failed"] == 1
+    assert first["added"] == 0
+
+    # Next run: same event still comes back as discovered+missing, and
+    # this time it scrapes cleanly.
+    good_pages = _full_pages(event_id="bad1", name="UFC Fight Night: Bad", date="August 22, 2026",
+                              fight_id="fbad1")
+    monkeypatch.setattr(pipeline, "UfcStatsBrowser", lambda: FakeBrowser(good_pages))
+    second = pipeline.run(data_dir=str(data_dir), dry_run=False)
+    assert second["added"] == 1
+    assert second["failed"] == 0
+
+    events = pd.read_csv(data_dir / "event.csv")
+    fights = pd.read_csv(data_dir / "fights.csv")
+    assert "bad1" in set(events["event_id"])
+    assert "fbad1" in set(fights["fight_id"])
+
+
+def test_run_retries_a_transient_fetch_failure_within_the_run(data_dir, monkeypatch):
+    pages = _full_pages()
+    event_url = "http://ufcstats.com/event-details/new1"
+    pages[event_url] = [UfcStatsFetchError("timeout"), pages[event_url]]
+    monkeypatch.setattr(pipeline, "UfcStatsBrowser", lambda: FakeBrowser(pages))
+
+    result = pipeline.run(data_dir=str(data_dir), dry_run=False)
+    assert result["added"] == 1
+    assert result["failed"] == 0
+
+
+def test_run_limit_caps_events_processed_this_run(data_dir, monkeypatch):
+    pages = {
+        **_full_pages(event_id="a1", name="UFC Fight Night: A", date="August 01, 2026", fight_id="fa1"),
+        **_full_pages(event_id="b1", name="UFC Fight Night: B", date="August 08, 2026", fight_id="fb1"),
+    }
+    pages[COMPLETED_EVENTS_URL] = _completed_events_page([
+        ("a1", "UFC Fight Night: A", "August 01, 2026"),
+        ("b1", "UFC Fight Night: B", "August 08, 2026"),
+    ])
+    pages[f"{COMPLETED_EVENTS_URL}?page=2"] = EMPTY_PAGE
+    monkeypatch.setattr(pipeline, "UfcStatsBrowser", lambda: FakeBrowser(pages))
+
+    result = pipeline.run(data_dir=str(data_dir), dry_run=False, limit=1)
+    assert result["added"] == 1
+    events = pd.read_csv(data_dir / "event.csv")
+    assert "a1" in set(events["event_id"])
+    assert "b1" not in set(events["event_id"])
+
+
+def test_run_aborts_whole_event_on_validation_failure_not_other_events(data_dir, monkeypatch):
     pages = _full_pages()
     monkeypatch.setattr(pipeline, "UfcStatsBrowser", lambda: FakeBrowser(pages))
     monkeypatch.setattr(merge, "validate_new_data",
                          lambda updated: (_ for _ in ()).throw(merge.ValidationError("forced failure")))
 
     before = (data_dir / "fights.csv").read_text()
-    with pytest.raises(merge.ValidationError):
-        pipeline.run(data_dir=str(data_dir), dry_run=False)
+    result = pipeline.run(data_dir=str(data_dir), dry_run=False)
 
+    assert result["added"] == 0
+    assert result["failed"] == 1
     assert (data_dir / "fights.csv").read_text() == before

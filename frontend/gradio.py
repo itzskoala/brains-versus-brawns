@@ -10,7 +10,6 @@ then this file:
     python frontend/gradio.py
 """
 import os
-import re
 
 import gradio as gr
 import requests
@@ -36,29 +35,68 @@ DIVISION_WEIGHT_LIMITS_KG = {
 }
 
 
+def _response_error_detail(resp):
+    """The error message to show for a non-2xx (or otherwise unreadable)
+    API response - tolerating a body that isn't JSON at all. A FastAPI
+    HTTPException's own shape is {"detail": "..."}, but a dead upstream, a
+    reverse-proxy timeout/error page, or any uncaught non-ValueError
+    exception on the API side hands back plain text or HTML instead, and
+    calling resp.json() on that unconditionally is what crashed predict()
+    (frontend/gradio.py) in production."""
+    try:
+        payload = resp.json()
+    except ValueError:  # requests.exceptions.JSONDecodeError subclasses ValueError
+        return resp.text.strip() or f"HTTP {resp.status_code}"
+    if isinstance(payload, dict) and "detail" in payload:
+        return payload["detail"]
+    return resp.text
+
+
 def _get(path, **params):
-    resp = requests.get(f"{API_URL}{path}", params=params, timeout=30)
-    resp.raise_for_status()
-    return resp.json()
+    """GET {API_URL}{path}, never raising a raw requests/JSON exception -
+    every failure mode (API unreachable, non-2xx status, a response body
+    that isn't JSON) becomes a gr.Error instead, which Gradio shows as a
+    clean toast rather than a 500 traceback or an unhandled crash."""
+    try:
+        resp = requests.get(f"{API_URL}{path}", params=params, timeout=30)
+    except requests.exceptions.RequestException as exc:
+        raise gr.Error(f"Could not reach the prediction API at {API_URL}: {exc}") from exc
+    if resp.status_code != 200:
+        raise gr.Error(f"The prediction API returned an error: {_response_error_detail(resp)}")
+    try:
+        return resp.json()
+    except ValueError as exc:
+        raise gr.Error("The prediction API returned a response that wasn't valid JSON.") from exc
 
 
 def _fighter_dropdown_label(f):
     """The picker's own label: fight-title format ('First "Nick" Last'),
-    with the API's DOB-disambiguator suffix (from display_name) carried
-    over unchanged for duplicate names. Deliberately NOT the raw
-    display_name - embedding the nickname here is what makes Gradio's own
-    built-in, instant, client-side Dropdown filter match nicknames too
-    (confirmed: a query like "Sugar" now matches a fighter labeled
-    'Sean "Suga" O\\'Malley (b. ...)' since "suga" is itself a substring of
-    "sugar" - see _fighter_matches_query for the exact rule this mirrors).
-    No server round-trip per keystroke needed for that - a per-keystroke
-    custom filter (an earlier version of this file used Dropdown.key_up)
-    raced against Gradio's own client-side filter and made selecting a
-    fighter feel laggy/inconsistent; this removes that race entirely by
-    not needing a second filter at all."""
+    with the API's disambiguator suffix (from display_name) carried over
+    unchanged for duplicate names - "(b. ...)" when a DOB is on record,
+    plus a short "[id:...]" fighter_id suffix on top of that for the rarer
+    case where even name+DOB isn't enough to tell two real fighters apart
+    (see api/main.py's _build_fighter_index: two distinct fighter_ids can
+    share both a name and a missing DOB, e.g. two real "Anthony Figueroa"
+    records - without ANY disambiguator they'd be two visually-identical
+    dropdown entries with no way to tell which is which before picking).
+    Whatever api/main.py appends after fighter_name is taken verbatim here,
+    rather than re-deriving it, so this never drifts out of sync with the
+    API's own disambiguation logic. Deliberately NOT the raw display_name
+    - embedding the nickname here is what makes Gradio's own built-in,
+    instant, client-side Dropdown filter match nicknames too (confirmed: a
+    query like "Sugar" now matches a fighter labeled 'Sean "Suga" O\\'Malley
+    (b. ...)' since "suga" is itself a substring of "sugar" - see
+    _fighter_matches_query for the exact rule this mirrors). No server
+    round-trip per keystroke needed for that - a per-keystroke custom
+    filter (an earlier version of this file used Dropdown.key_up) raced
+    against Gradio's own client-side filter and made selecting a fighter
+    feel laggy/inconsistent; this removes that race entirely by not
+    needing a second filter at all."""
     name = _format_fighter_name(f.get("fighter_name") or f.get("fighter_id", ""), f.get("nick_name"))
-    dob_suffix = re.search(r"\(b\.[^)]*\)", f.get("display_name") or "")
-    return f"{name} {dob_suffix.group()}" if dob_suffix else name
+    raw_name = f.get("fighter_name") or ""
+    display_name = f.get("display_name") or ""
+    suffix = display_name[len(raw_name):].strip() if display_name.startswith(raw_name) else ""
+    return f"{name} {suffix}" if suffix else name
 
 
 def _fighter_choices(division):
@@ -139,6 +177,15 @@ def _filter_fighters(fighters, query):
     return [f for f in fighters if _fighter_matches_query(f.get("fighter_name", ""), f.get("nick_name"), query)]
 
 
+def _clear_results():
+    """Blanks the prior matchup's Tale of the Tape, headline, past-meetings
+    history, and stashed unit-toggle state. Fired whenever a new set of
+    fighters starts loading (a fighter pick in either corner, or a division
+    switch) so a stale tape from the previous matchup never lingers on
+    screen next to a fresh photo/selection."""
+    return "", "", "", None
+
+
 def on_division_change(division):
     choices, fighters = _fighter_choices(division)
     placeholder = images.fighter_placeholder_html()
@@ -154,6 +201,7 @@ def on_division_change(division):
         placeholder, False,
         placeholder, False,
         gr.update(interactive=False),
+        *_clear_results(),
     )
 
 
@@ -166,8 +214,17 @@ def on_fighter_change(division, fighter_id, other_fighter_id):
         return gr.update(choices=[NO_YEAR_CHOICE], value=NO_YEAR_CHOICE), gr.update(), gr.update()
 
     _, fighters = _fighter_choices(division)
-    years = next(f["years"] for f in fighters if f["fighter_id"] == fighter_id)
-    year_update = gr.update(choices=[NO_YEAR_CHOICE] + [str(y) for y in years], value=NO_YEAR_CHOICE)
+    info = next((f for f in fighters if f["fighter_id"] == fighter_id), None)
+    if info is None:
+        # A stale or invalid selection - the division changed out from
+        # under this pick, or (the Fighter dropdowns allow a custom value
+        # so a direct API call can submit anything) fighter_id was never a
+        # real choice for this division at all. Nothing to refresh years
+        # from; fail the same clean way as "no fighter selected" instead
+        # of crashing on a next() with no match and no default.
+        return gr.update(choices=[NO_YEAR_CHOICE], value=NO_YEAR_CHOICE), gr.update(), gr.update()
+
+    year_update = gr.update(choices=[NO_YEAR_CHOICE] + [str(y) for y in info["years"]], value=NO_YEAR_CHOICE)
 
     if fighter_id == other_fighter_id:
         return (
@@ -324,8 +381,16 @@ def predict(model_name, division, red_fighter_id, red_year, blue_fighter_id, blu
 
     _, fighters = _fighter_choices(division)
     info_by_id = {f["fighter_id"]: f for f in fighters}
-    red_info = info_by_id.get(red_fighter_id, {})
-    blue_info = info_by_id.get(blue_fighter_id, {})
+    if red_fighter_id not in info_by_id or blue_fighter_id not in info_by_id:
+        # A stale or invalid selection - e.g. the division changed out
+        # from under one corner's pick, or (the Fighter dropdowns allow a
+        # custom value, so a direct API call can submit anything) an id
+        # that was never a real choice for this division at all. Nothing
+        # valid to predict from; fail the same clean way as "pick both
+        # fighters" rather than sending it to the API at all.
+        return "Error: one or both selected fighters aren't valid for this division - pick again.", "", "", None
+    red_info = info_by_id[red_fighter_id]
+    blue_info = info_by_id[blue_fighter_id]
     # Fight-title format ('First "Nickname" Last", plain "First Last" with
     # no nickname on record) everywhere a fighter is named in a result -
     # the picker dropdown keeps its own display_name (with DOB) separately,
@@ -341,11 +406,18 @@ def predict(model_name, division, red_fighter_id, red_year, blue_fighter_id, blu
         "blue_fighter_id": blue_fighter_id,
         "blue_year": None if blue_year in (None, NO_YEAR_CHOICE) else int(blue_year),
     }
-    resp = requests.post(f"{API_URL}/predict", json=payload, timeout=60)
-    if resp.status_code != 200:
-        return f"Error: {resp.json().get('detail', resp.text)}", "", "", None
+    try:
+        resp = requests.post(f"{API_URL}/predict", json=payload, timeout=60)
+    except requests.exceptions.RequestException as exc:
+        return f"Error: could not reach the prediction API ({exc}).", "", "", None
 
-    data = resp.json()
+    if resp.status_code != 200:
+        return f"Error: {_response_error_detail(resp)}", "", "", None
+
+    try:
+        data = resp.json()
+    except ValueError:
+        return "Error: the prediction API returned a response that wasn't valid JSON.", "", "", None
     winner_name = red_name if data["predicted_winner"] == "red" else blue_name
     headline = (
         f"## Predicted winner: {winner_name}\n"
@@ -391,19 +463,35 @@ with gr.Blocks(title="UFC Matchup Predictor") as demo:
         "Corner color has no effect on the prediction."
     )
 
-    model_dropdown = gr.Dropdown(label="Model", choices=[], filterable=False)
-    division_dropdown = gr.Dropdown(label="Weight Division", choices=[], filterable=True)
+    # allow_custom_value=True on every dropdown whose real choices only
+    # exist once on_load()/on_division_change() populates them: without it,
+    # Gradio's own Dropdown.preprocess() hard-raises ("Value: 'x' is not in
+    # the list of choices: []") for ANY request that reaches this Blocks
+    # app before that happens (a fresh session hitting the queue API
+    # before its load event completes, a stale browser tab replaying an
+    # old selection, or a direct API call) - and that raise, deep in
+    # Gradio's queue/SSE handling rather than our own code, is what was
+    # cascading into the "response already started" crash. The handler
+    # functions below (on_fighter_change, predict) are the actual guard
+    # now - they treat a value that isn't one of the current choices as a
+    # stale/invalid selection and fail gracefully instead of crashing.
+    # filterable=True here (previously False - only 3 choices) because
+    # Gradio requires it whenever allow_custom_value=True; harmless given
+    # how few choices this dropdown ever has.
+    model_dropdown = gr.Dropdown(label="Model", choices=[], filterable=True, allow_custom_value=True)
+    division_dropdown = gr.Dropdown(label="Weight Division", choices=[], filterable=True,
+                                     allow_custom_value=True)
 
     with gr.Row():
         with gr.Column():
             gr.Markdown("### Red Corner")
             red_fighter = gr.Dropdown(label="Fighter (type a name or nickname to search)",
-                                       choices=[], filterable=True)
+                                       choices=[], filterable=True, allow_custom_value=True)
             red_year = gr.Dropdown(label="Year (optional)", choices=[NO_YEAR_CHOICE], value=NO_YEAR_CHOICE)
         with gr.Column():
             gr.Markdown("### Blue Corner")
             blue_fighter = gr.Dropdown(label="Fighter (type a name or nickname to search)",
-                                        choices=[], filterable=True)
+                                        choices=[], filterable=True, allow_custom_value=True)
             blue_year = gr.Dropdown(label="Year (optional)", choices=[NO_YEAR_CHOICE], value=NO_YEAR_CHOICE)
 
     # Disabled until both corners have a fighter picked AND that fighter's
@@ -423,7 +511,8 @@ with gr.Blocks(title="UFC Matchup Predictor") as demo:
     division_dropdown.change(
         on_division_change, inputs=[division_dropdown],
         outputs=[red_fighter, red_year, blue_fighter, blue_year, fighters_state,
-                  red_photo, red_selected_state, blue_photo, blue_selected_state, predict_button])
+                  red_photo, red_selected_state, blue_photo, blue_selected_state, predict_button,
+                  result_headline, tale_of_the_tape_panel, rematch_history, last_result_state])
     # A fighter can't face themselves: picking the same fighter already
     # selected in the other corner clears that other corner instead of
     # leaving two identical corners selected - see on_fighter_change.
@@ -447,6 +536,13 @@ with gr.Blocks(title="UFC Matchup Predictor") as demo:
     blue_fighter.change(
         on_fighter_photo_change, inputs=[blue_fighter, fighters_state, red_selected_state],
         outputs=[blue_photo, blue_selected_state, predict_button])
+    # A new fighter pick in either corner means a new matchup is loading -
+    # clear the previous matchup's Tale of the Tape/headline/history so it
+    # never sits stale next to the new selection (see _clear_results).
+    red_fighter.change(
+        _clear_results, outputs=[result_headline, tale_of_the_tape_panel, rematch_history, last_result_state])
+    blue_fighter.change(
+        _clear_results, outputs=[result_headline, tale_of_the_tape_panel, rematch_history, last_result_state])
 
     def on_unit_toggle(unit, divisions, current_division, last_result):
         new_unit = "kg" if unit == "lbs" else "lbs"

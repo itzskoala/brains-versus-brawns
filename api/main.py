@@ -88,6 +88,27 @@ def _build_fighter_index(fights, fighters_df):
             "divisions": set(group["weight_class"].dropna().unique()),
             "years": sorted(int(y) for y in group["event_date"].dt.year.unique()),
         }
+
+    # Two different real fighters can share both a name AND have no DOB on
+    # record to tell them apart (verified against real fighter.csv, e.g.
+    # two distinct "Anthony Figueroa" fighter_ids) - the "(b. ...)"
+    # disambiguator above does nothing for them, so without this they'd
+    # show as two visually-identical options in the Fighter dropdown with
+    # no way for a user to tell which is which before picking (a fighter
+    # IDENTITY integrity gap, not a missing-data one - both records are
+    # correct and distinct, just indistinguishable in the UI). Append a
+    # short, stable fighter_id suffix to every display_name that still
+    # collides after the dob check, for every such group, not just the
+    # no-dob case - any future collision (e.g. two same-named fighters who
+    # happen to share a dob too) gets the same guarantee of uniqueness.
+    by_display_name = {}
+    for info in index.values():
+        by_display_name.setdefault(info["display_name"], []).append(info)
+    for group in by_display_name.values():
+        if len(group) > 1:
+            for info in group:
+                info["display_name"] = f"{info['display_name']} [id:{info['fighter_id'][:8]}]"
+
     return index
 
 
