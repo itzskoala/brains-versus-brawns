@@ -20,7 +20,7 @@ from sklearn.metrics import accuracy_score, log_loss, roc_auc_score
 from xgboost import XGBClassifier
 
 from src.data.splitting import walk_forward_splits
-from src.features.engineering import engineer_fold_features
+from src.features.engineering import engineer_fold_features, is_predictable_outcome
 from src.features.imputation import apply_imputer, fit_imputer, missing_indicator_columns
 from src.features.scaling import apply_scaler, fit_scaler
 from src.models.logistic_regression import (
@@ -73,6 +73,8 @@ def run_backtest(fights, model_name, representation, rounds=None, freq="Y", min_
 
     for period, train, test in walk_forward_splits(fights, freq=freq, min_train_size=min_train_size):
         train, test = engineer_fold_features(train, test, rounds=rounds)
+        train = train[is_predictable_outcome(train)]
+        test = test[is_predictable_outcome(test)]
         train = _symmetrize(train, feature_columns)
         test = _symmetrize(test, feature_columns)
 

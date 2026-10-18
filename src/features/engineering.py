@@ -38,6 +38,22 @@ FIGHT_STAT_COLUMNS = {
 STAT_NAMES = list(FIGHT_STAT_COLUMNS.keys())
 
 
+def _add_outcome_flags(long):
+    """Add is_winner/is_loser/is_draw/is_no_contest (0/1) columns to a
+    long-format fighter-fight DataFrame that already has winner_id and
+    result_status. winner_id alone is ambiguous: it's null for BOTH a draw
+    and a no-contest, so "winner_id != fighter_id" is not the same thing as
+    "lost" - result_status ("win"/"draw"/"no_contest") is what actually
+    distinguishes them. Mutates and returns long. Shared by every history
+    feature function below so this 3-way outcome logic lives in one place,
+    not re-derived per function."""
+    long["is_winner"] = (long["winner_id"] == long["fighter_id"]).astype(int)
+    long["is_draw"] = (long["result_status"] == "draw").astype(int)
+    long["is_no_contest"] = (long["result_status"] == "no_contest").astype(int)
+    long["is_loser"] = ((long["result_status"] == "win") & (long["winner_id"] != long["fighter_id"])).astype(int)
+    return long
+
+
 def _prior_sum_by_date(long, value_cols, fighter_col="fighter_id", date_col="event_date"):
     """For each row, the sum of value_cols over this fighter's STRICTLY
     earlier dates only. Rows that share a fighter's exact event_date - e.g.
@@ -98,24 +114,37 @@ def add_matchup_features(df):
 
 def add_fighter_history_features(df):
     """Add each fighter's record coming into the fight: prior fight count,
-    prior wins, prior win rate, and days since their last fight. Each value
-    is computed from fights strictly before the current one - including
-    same-date fights, see _prior_sum_by_date - so nothing about the fight
-    being predicted leaks in. Returns a new DataFrame."""
+    prior wins/losses/draws/no-contests (raw counts - a DQ counts as an
+    ordinary win for the winner and an ordinary loss for the loser, same as
+    any other decided fight, since _add_outcome_flags only special-cases
+    result_status "draw"/"no_contest"), prior win rate (wins / (wins +
+    losses) - draws/no-contests are excluded from this denominator,
+    standard sports-analytics convention, since a draw is not a loss),
+    prior draw rate, prior no-contest rate (both / prior fight count), and
+    days since their last fight. Each value is computed from fights
+    strictly before the current one - including same-date fights, see
+    _prior_sum_by_date - so nothing about the fight being predicted leaks
+    in. Returns a new DataFrame."""
     df = df.copy()
 
-    r_side = df[["fight_id", "event_date", "r_fighter_id", "winner_id"]].rename(
+    r_side = df[["fight_id", "event_date", "r_fighter_id", "winner_id", "result_status"]].rename(
         columns={"r_fighter_id": "fighter_id"})
-    b_side = df[["fight_id", "event_date", "b_fighter_id", "winner_id"]].rename(
+    b_side = df[["fight_id", "event_date", "b_fighter_id", "winner_id", "result_status"]].rename(
         columns={"b_fighter_id": "fighter_id"})
     long = pd.concat([r_side, b_side], ignore_index=True)
-    long["is_winner"] = (long["winner_id"] == long["fighter_id"]).astype(int)
+    long = _add_outcome_flags(long)
     long["_one"] = 1
 
-    prior = _prior_sum_by_date(long, ["_one", "is_winner"])
+    prior = _prior_sum_by_date(long, ["_one", "is_winner", "is_loser", "is_draw", "is_no_contest"])
     long["prior_fights"] = prior["prior__one"]
     long["prior_wins"] = prior["prior_is_winner"]
-    long["prior_win_rate"] = long["prior_wins"] / long["prior_fights"]
+    long["prior_losses"] = prior["prior_is_loser"]
+    long["prior_draws"] = prior["prior_is_draw"]
+    long["prior_no_contests"] = prior["prior_is_no_contest"]
+    prior_decided = prior["prior_is_winner"] + prior["prior_is_loser"]
+    long["prior_win_rate"] = prior["prior_is_winner"] / prior_decided
+    long["prior_draw_rate"] = prior["prior_is_draw"] / long["prior_fights"]
+    long["prior_no_contest_rate"] = prior["prior_is_no_contest"] / long["prior_fights"]
 
     # days since the fighter's most recent STRICTLY earlier date - a
     # same-date fight (see _prior_sum_by_date) shares this value with its
@@ -128,17 +157,24 @@ def add_fighter_history_features(df):
         unique_dates, on=["fighter_id", "event_date"], how="left")["_prev_date"]
     long["days_since_last_fight"] = (long["event_date"] - prev_date.values).dt.days
 
-    history = long[["fight_id", "fighter_id", "prior_fights", "prior_wins",
-                     "prior_win_rate", "days_since_last_fight"]]
+    history = long[["fight_id", "fighter_id", "prior_fights", "prior_wins", "prior_losses",
+                     "prior_draws", "prior_no_contests", "prior_win_rate", "prior_draw_rate",
+                     "prior_no_contest_rate", "days_since_last_fight"]]
 
     r_history = history.rename(columns={
         "fighter_id": "r_fighter_id", "prior_fights": "r_prior_fights",
-        "prior_wins": "r_prior_wins", "prior_win_rate": "r_prior_win_rate",
+        "prior_wins": "r_prior_wins", "prior_losses": "r_prior_losses",
+        "prior_draws": "r_prior_draws", "prior_no_contests": "r_prior_no_contests",
+        "prior_win_rate": "r_prior_win_rate",
+        "prior_draw_rate": "r_prior_draw_rate", "prior_no_contest_rate": "r_prior_no_contest_rate",
         "days_since_last_fight": "r_days_since_last_fight",
     })
     b_history = history.rename(columns={
         "fighter_id": "b_fighter_id", "prior_fights": "b_prior_fights",
-        "prior_wins": "b_prior_wins", "prior_win_rate": "b_prior_win_rate",
+        "prior_wins": "b_prior_wins", "prior_losses": "b_prior_losses",
+        "prior_draws": "b_prior_draws", "prior_no_contests": "b_prior_no_contests",
+        "prior_win_rate": "b_prior_win_rate",
+        "prior_draw_rate": "b_prior_draw_rate", "prior_no_contest_rate": "b_prior_no_contest_rate",
         "days_since_last_fight": "b_days_since_last_fight",
     })
 
@@ -147,6 +183,8 @@ def add_fighter_history_features(df):
 
     df["experience_diff"] = df["r_prior_fights"] - df["b_prior_fights"]
     df["prior_win_rate_diff"] = df["r_prior_win_rate"] - df["b_prior_win_rate"]
+    df["prior_draw_rate_diff"] = df["r_prior_draw_rate"] - df["b_prior_draw_rate"]
+    df["prior_no_contest_rate_diff"] = df["r_prior_no_contest_rate"] - df["b_prior_no_contest_rate"]
 
     return df
 
@@ -363,27 +401,35 @@ def add_recent_form_features(df):
     about the fight being predicted leaks in. Returns a new DataFrame."""
     df = df.copy()
 
-    r_side = df[["fight_id", "event_date", "r_fighter_id", "winner_id"]].rename(
+    r_side = df[["fight_id", "event_date", "r_fighter_id", "winner_id", "result_status"]].rename(
         columns={"r_fighter_id": "fighter_id"})
-    b_side = df[["fight_id", "event_date", "b_fighter_id", "winner_id"]].rename(
+    b_side = df[["fight_id", "event_date", "b_fighter_id", "winner_id", "result_status"]].rename(
         columns={"b_fighter_id": "fighter_id"})
     long = pd.concat([r_side, b_side], ignore_index=True)
-    long["is_winner"] = (long["winner_id"] == long["fighter_id"]).astype(int)
+    long = _add_outcome_flags(long)
+    # A draw/no-contest is neither a win nor a loss: it must break a streak
+    # of either kind, not silently extend a loss streak (is_winner alone is
+    # 0 for both a loss AND a draw/NC, which would do exactly that - see
+    # _add_outcome_flags). "_outcome" distinguishes all three so the streak
+    # block logic below resets correctly on a draw/NC.
+    long["_outcome"] = "loss"
+    long.loc[long["is_winner"] == 1, "_outcome"] = "win"
+    long.loc[(long["is_draw"] == 1) | (long["is_no_contest"] == 1), "_outcome"] = "no_decision"
     long = long.sort_values(["fighter_id", "event_date"])
 
     grouped = long.groupby("fighter_id")
 
-    # length of the run of identical results (all wins or all losses) each
-    # fight belongs to, then shift by one fight so a fight only reflects the
-    # streak entering it, never its own result.
-    is_new_block = long["is_winner"] != grouped["is_winner"].shift()
+    # length of the run of identical results (all wins, all losses, or all
+    # no-decisions) each fight belongs to, then shift by one fight so a
+    # fight only reflects the streak entering it, never its own result.
+    is_new_block = long["_outcome"] != grouped["_outcome"].shift()
     long["_block"] = is_new_block.groupby(long["fighter_id"]).cumsum()
     long["_streak_len"] = long.groupby(["fighter_id", "_block"]).cumcount() + 1
 
     entering_streak = grouped["_streak_len"].shift(1).fillna(0)
-    entering_was_win = grouped["is_winner"].shift(1)
-    long["win_streak"] = entering_streak.where(entering_was_win == 1, 0)
-    long["loss_streak"] = entering_streak.where(entering_was_win == 0, 0)
+    entering_outcome = grouped["_outcome"].shift(1)
+    long["win_streak"] = entering_streak.where(entering_outcome == "win", 0)
+    long["loss_streak"] = entering_streak.where(entering_outcome == "loss", 0)
 
     long["form_last5_win_rate"] = grouped["is_winner"].transform(
         lambda s: s.shift(1).rolling(5, min_periods=1).mean())
@@ -435,6 +481,31 @@ def add_stance_matchup_features(df):
     return df
 
 
+# Hard constraint: the model must only ever predict Red or Blue as the
+# winner - never a draw, no-contest, DQ, or overturned result. These
+# outcomes still flow through clean_fights and engineer_fold_features in
+# full (their stats/history count toward every later fight's features, see
+# _add_outcome_flags), but is_predictable_outcome is what every model's
+# run_backtest/nested_validation/persistence.fit_final_model call right
+# after engineer_fold_features to drop them from the actual (X, y)
+# training/test rows - a draw/no-contest has no winner to learn from at
+# all, and a DQ/overturned result is decided by a rule violation, not
+# fighting skill, so neither belongs in the target the model is fit or
+# scored against.
+NON_PREDICTABLE_RESULT_STATUSES = {"draw", "no_contest"}
+NON_PREDICTABLE_METHOD_LABELS = {"dq", "overturned"}
+
+
+def is_predictable_outcome(df):
+    """Boolean mask: True for a fight with a genuine, fighting-skill-decided
+    red/blue winner - see the module-level note above for why draws,
+    no-contests, DQs, and overturned results are excluded."""
+    return (
+        ~df["result_status"].isin(NON_PREDICTABLE_RESULT_STATUSES)
+        & ~df["method_label"].isin(NON_PREDICTABLE_METHOD_LABELS)
+    )
+
+
 def engineer_fold_features(train, test, rounds=None):
     """Build matchup, fighter-history, career-stat, finish-tendency,
     recent-form, stance, and (if rounds is given) early-pace features for
@@ -445,15 +516,18 @@ def engineer_fold_features(train, test, rounds=None):
     test) with the same rows as the inputs, features attached."""
     fold = pd.concat([train, test])
 
-    # Every is_winner computation below treats a null winner_id as a loss
-    # for both fighters (NaN == anything is False) - silently wrong for a
-    # draw/no-contest. clean_fights already drops rows with no winner, so
-    # this should never trip; it's here so a future change that skips
-    # clean_fights fails loudly instead of quietly mislabeling outcomes.
-    assert fold["winner_id"].notna().all(), (
-        "engineer_fold_features assumes draws/no-contests/missing winners "
-        "were already dropped (see clean_fights) - a null winner_id would "
-        "silently compute is_winner=False (a loss) for both fighters."
+    # Every outcome computation below (_add_outcome_flags) derives
+    # win/loss/draw/no-contest from result_status, not from winner_id alone
+    # - a draw and a no-contest both have winner_id == NaN, and
+    # result_status is what tells them apart. This only fails loudly if
+    # result_status itself is missing or holds something unrecognized -
+    # clean_fights always produces "win"/"draw"/"no_contest" - so a future
+    # change upstream that breaks that contract fails here instead of
+    # quietly mislabeling outcomes.
+    assert fold["result_status"].isin(["win", "draw", "no_contest"]).all(), (
+        "engineer_fold_features assumes every row's result_status is one of "
+        "'win'/'draw'/'no_contest' (see clean_fights) - an unrecognized or "
+        "missing value here would silently break _add_outcome_flags."
     )
 
     fold = add_matchup_features(fold)

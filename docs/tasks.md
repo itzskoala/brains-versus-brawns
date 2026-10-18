@@ -88,7 +88,7 @@ Tasks should be completed incrementally. Do not implement future tasks premature
 # Phase 7 — Evaluation
 
 * [ ] Establish final evaluation methodology
-* [x] Run final model comparisons - winner target only: `src/evaluation/train_predict_evaluate.py` runs all three production models' walk-forward backtest side by side, saves per-fold predictions/metrics/summary + comparison charts under `docs/` (2026-10-10, see `results.md`). Multi-target prediction (method of victory, strikes, takedowns, control time, etc.) deliberately deferred.
+* [x] Run final model comparisons - winner target only: `src/evaluation/train_predict_evaluate.py` runs all three production models' walk-forward backtest side by side, saves per-fold predictions/metrics/summary + comparison charts under `docs/` (2026-10-10, see `results.md`). Multi-target prediction (method of victory, round, strikes, takedowns, control time, etc.) deliberately deferred - see the "New prediction targets" Recommendation below (requested 2026-10-18, not yet implemented).
 * [ ] Evaluate probability quality where applicable
 * [ ] Perform error analysis
 * [ ] Investigate unexpected results
@@ -176,6 +176,43 @@ Status:
 ```
 
 Recommendations should not automatically become tasks until they are accepted or clearly required by the project scope.
+
+## Recommendation — New prediction targets: fight-ending round and win method
+
+Recommendation:
+Build these as two new, separate `logistic_regression`-only multiclass models first (mirroring
+the existing per-model-file pattern, not a speculative multi-task refactor), not for
+random_forest/xgboost_model yet. Method target: multiclass over the same coarse KO/TKO,
+Submission, Decision, Other bucketing `_format_tale_of_the_tape`'s `wins_by_method` already uses,
+restricted to `result_status == "win"` fights (DQ/draw/no-contest excluded - there is no
+skill-based "method" to predict for those, same reasoning as `is_predictable_outcome`). Round
+target: multiclass over `finish_round` for the same win-only subset, with `rounds_scheduled`
+(from `time_format`) added as a feature so the model isn't blind to why some fights can only end
+at round 5. Requires parameterizing `src/evaluation/nested_validation.py`'s hardcoded `"label"`
+references into a `target_column` argument so the existing nested walk-forward tuning machinery
+is reused rather than duplicated. New baselines (majority-class predictor per target, e.g.
+"always predict decision"/"always predict round 3") must be established and reported in
+`docs/results.md`'s existing table format before any trained model is kept, same discipline as
+every other model change in this file.
+
+Reason:
+Explicitly requested (user, 2026-10-18) as part of a larger backend audit. No leakage-boundary
+work is needed - round/method are just additional label columns on rows the walk-forward split
+already isolates correctly per fold - but it is real new modeling work (new target definitions,
+new artifacts, new baselines) that deserves its own scoped pass rather than being rushed inside
+a session already covering four other substantial changes (complete fight data, the hard
+red/blue-only prediction constraint, feature documentation, and the debutant-bias investigation -
+see `docs/results.md`).
+
+Alternatives:
+Extend all three model files at once - rejected for now as unnecessary surface area before even
+one target is validated; triples the near-duplicate `run_backtest` logic each of the three files
+already has (a known, separately-flagged duplication) for no proven benefit yet. A shared
+multi-output model instead of per-target classifiers - rejected as a bigger architectural change
+than this dataset size or the existing per-model-file convention calls for.
+
+Status:
+Pending
 
 ---
 

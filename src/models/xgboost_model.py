@@ -3,7 +3,7 @@ from sklearn.metrics import accuracy_score, log_loss, mean_squared_error, roc_au
 from xgboost import XGBClassifier
 
 from src.data.splitting import walk_forward_splits
-from src.features.engineering import engineer_fold_features
+from src.features.engineering import engineer_fold_features, is_predictable_outcome
 from src.features.imputation import apply_imputer, fit_imputer, missing_indicator_columns
 from src.models.logistic_regression import FEATURE_COLUMNS, _symmetrize
 
@@ -47,6 +47,10 @@ def run_backtest(fights, rounds=None, freq="Y", min_train_size=500, feature_colu
 
     for period, train, test in walk_forward_splits(fights, freq=freq, min_train_size=min_train_size):
         train, test = engineer_fold_features(train, test, rounds=rounds)
+        # Hard constraint: never a training/evaluation example for a draw,
+        # no-contest, DQ, or overturned result - see is_predictable_outcome.
+        train = train[is_predictable_outcome(train)]
+        test = test[is_predictable_outcome(test)]
         train = _symmetrize(train, feature_columns)
         test = _symmetrize(test, feature_columns)
 
@@ -98,6 +102,7 @@ def run_backtest(fights, rounds=None, freq="Y", min_train_size=500, feature_colu
             predictions.append(pd.DataFrame({
                 "period": str(period),
                 "fight_id": test["fight_id"].values,
+                "fighter_id": test["fighter_id"].values,
                 "y_true": y_test.values,
                 "y_pred": preds,
                 "y_prob": probs,
@@ -107,7 +112,7 @@ def run_backtest(fights, rounds=None, freq="Y", min_train_size=500, feature_colu
     metrics = pd.DataFrame(results)
     if return_predictions:
         predictions_df = pd.concat(predictions, ignore_index=True) if predictions else pd.DataFrame(
-            columns=["period", "fight_id", "y_true", "y_pred", "y_prob"])
+            columns=["period", "fight_id", "fighter_id", "y_true", "y_pred", "y_prob"])
         return metrics, predictions_df
     return metrics
 

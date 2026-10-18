@@ -187,6 +187,31 @@ def test_predict_happy_path_with_per_fighter_years(client):
     assert 0.0 <= meeting["predicted"]["red_win_probability"] <= 1.0
 
 
+def test_predict_record_breaks_out_wins_losses_draws_and_no_contests_separately(client):
+    jones = _fighter_id(client, "Light Heavyweight", "Jon Jones")
+    cormier = _fighter_id(client, "Light Heavyweight", "Daniel Cormier")
+
+    resp = client.post("/predict", json={
+        "model_name": "xgboost_model",
+        "division": "Light Heavyweight",
+        "red_fighter_id": jones,
+        "red_year": None,
+        "blue_fighter_id": cormier,
+        "blue_year": None,
+    })
+    assert resp.status_code == 200
+    record = resp.json()["red_stats"]["record"]
+
+    for key in ("prior_fights", "prior_wins", "prior_losses", "prior_draws", "prior_no_contests"):
+        assert key in record
+
+    # wins + losses + draws + no-contests must reconstruct prior_fights
+    # exactly - a draw/no-contest is neither a win nor a loss, so it's not
+    # double-counted or dropped.
+    assert (record["prior_wins"] + record["prior_losses"]
+            + record["prior_draws"] + record["prior_no_contests"]) == record["prior_fights"]
+
+
 def test_predict_defaults_to_full_history_when_year_omitted(client):
     jones = _fighter_id(client, "Light Heavyweight", "Jon Jones")
     cormier = _fighter_id(client, "Light Heavyweight", "Daniel Cormier")

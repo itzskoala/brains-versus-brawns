@@ -15,6 +15,7 @@ def make_fight(fight_id, date, r_id, b_id, winner_id, r_reach_inches=70, b_reach
     fight = {
         "fight_id": fight_id, "event_date": pd.Timestamp(date),
         "r_fighter_id": r_id, "b_fighter_id": b_id, "winner_id": winner_id,
+        "result_status": "win",
         "r_dob": pd.Timestamp("1990-01-01"), "b_dob": pd.Timestamp("1985-01-01"),
         "r_height": 70, "b_height": 72, "r_reach_inches": r_reach_inches, "b_reach_inches": b_reach_inches,
         "r_weight_lbs": 170, "b_weight_lbs": 185, "weight_class": weight_class,

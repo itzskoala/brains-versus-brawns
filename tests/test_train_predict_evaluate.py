@@ -13,13 +13,15 @@ ALL_MODULES = [logistic_regression, random_forest, xgboost_model]
 
 
 def make_fight(fight_id, date, r_id, b_id, winner_id, method_label="decision_unanimous",
-               finish_round=3, rounds_fought=3, r_stance="Orthodox", b_stance="Orthodox"):
+               finish_round=3, rounds_fought=3, r_stance="Orthodox", b_stance="Orthodox",
+               result_status="win"):
     # full master.csv-shaped row, matching tests/test_engineering.py's and
     # tests/test_nested_validation.py's helper - engineer_fold_features
     # needs every one of these columns to exist.
     fight = {
         "fight_id": fight_id, "event_date": pd.Timestamp(date),
         "r_fighter_id": r_id, "b_fighter_id": b_id, "winner_id": winner_id,
+        "result_status": result_status,
         "r_dob": pd.Timestamp("1990-01-01"), "b_dob": pd.Timestamp("1990-01-01"),
         "r_height": 70, "b_height": 70, "r_reach_inches": 70, "b_reach_inches": 70,
         "r_weight_lbs": 170, "b_weight_lbs": 170, "weight_class": "Lightweight",
@@ -84,6 +86,58 @@ def test_run_backtest_fits_imputer_on_train_fold_fights_only(module):
     for (period, train, test), seen_ids in zip(expected_folds, seen_train_fight_ids):
         assert seen_ids == set(train["fight_id"])
         assert seen_ids.isdisjoint(set(test["fight_id"]))
+
+
+# ---------------------------------------------------------------------------
+# Hard constraint: the model must only ever predict Red or Blue - never a
+# draw, no-contest, DQ, or overturned result. These outcomes are mixed
+# into the fight history below (so the walk-forward split/feature
+# engineering sees and processes them, same as real data post-Phase-A) but
+# must never become an (X, y) training OR test example for any model.
+# ---------------------------------------------------------------------------
+
+def _make_multi_year_fights_with_non_predictable_outcomes():
+    """Same shape as _make_multi_year_fights, with one draw, one
+    no-contest, one DQ, and one overturned result mixed into the middle
+    years - interspersed among plenty of ordinary wins so every fold still
+    has real training data, and recorded by the SAME two fighters (A, B)
+    repeatedly so a leak would be easy for the model to exploit if the
+    guard failed."""
+    rows = list(_make_multi_year_fights().to_dict("records"))
+    rows += [
+        make_fight("draw1", "2017-06-15", "A", "B", None, result_status="draw"),
+        make_fight("nc1", "2018-06-15", "A", "B", None, result_status="no_contest"),
+        make_fight("dq1", "2019-06-15", "A", "B", "A", method_label="dq"),
+        make_fight("overturned1", "2020-06-15", "A", "B", None,
+                   result_status="no_contest", method_label="overturned"),
+    ]
+    return pd.DataFrame(rows)
+
+
+NON_PREDICTABLE_FIGHT_IDS = {"draw1", "nc1", "dq1", "overturned1"}
+
+
+@pytest.mark.parametrize("module", ALL_MODULES)
+def test_run_backtest_never_trains_or_tests_on_a_non_predictable_outcome(module):
+    fights = _make_multi_year_fights_with_non_predictable_outcomes()
+
+    seen_train_fight_ids = set()
+    original_fit_imputer = module.fit_imputer
+
+    def spy(df, columns):
+        seen_train_fight_ids.update(df["fight_id"])
+        return original_fit_imputer(df, columns)
+
+    with patch.object(module, "fit_imputer", side_effect=spy):
+        _, predictions = module.run_backtest(
+            fights, freq="Y", min_train_size=MIN_TRAIN_SIZE, return_predictions=True)
+
+    assert seen_train_fight_ids.isdisjoint(NON_PREDICTABLE_FIGHT_IDS)
+    assert set(predictions["fight_id"]).isdisjoint(NON_PREDICTABLE_FIGHT_IDS)
+    # the guard isn't just dropping everything - plenty of ordinary wins
+    # still made it through as real training/test examples.
+    assert len(seen_train_fight_ids) > 0
+    assert len(predictions) > 0
 
 
 def test_logistic_regression_run_backtest_fits_scaler_on_train_fold_rows_only():
@@ -209,7 +263,8 @@ def test_save_outputs_and_save_charts_write_the_expected_files(tmp_path):
         assert (tmp_path / name).exists()
 
     saved_predictions = pd.read_csv(tmp_path / "winner_predictions.csv")
-    assert list(saved_predictions.columns) == ["model", "period", "fight_id", "y_true", "y_pred", "y_prob"]
+    assert list(saved_predictions.columns) == [
+        "model", "period", "fight_id", "fighter_id", "y_true", "y_pred", "y_prob"]
     assert len(saved_predictions) == len(predictions_df)
 
     saved_summary = pd.read_csv(tmp_path / "winner_metrics_summary.csv")

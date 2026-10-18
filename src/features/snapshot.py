@@ -127,6 +127,12 @@ def build_fighter_snapshot(fights, fighters_df, fighter_id, as_of_date, weight_c
         "event_date": as_of_date + pd.Timedelta(seconds=1),
         "weight_class": weight_class,
         "winner_id": _PLACEHOLDER_FIGHTER_ID + "_winner_never_used",
+        # Always "win" - this phantom row only ever exists to compute the
+        # real fighter's OWN prior-to-as_of_date features (only its r_*
+        # side is ever read back, see this function's docstring); its own
+        # outcome is never read, but engineer_fold_features' result_status
+        # assertion still requires a recognized value.
+        "result_status": "win",
         "title_fight": False,
         "finish_round": 1,
         "finish_time": 0,
@@ -361,6 +367,9 @@ def build_display_stats(fights, fights_with_features, fighters_df, fighter_id, a
         "record": {
             "prior_fights": snapshot["prior_fights"],
             "prior_wins": snapshot["prior_wins"],
+            "prior_losses": snapshot["prior_losses"],
+            "prior_draws": snapshot["prior_draws"],
+            "prior_no_contests": snapshot["prior_no_contests"],
             "prior_win_rate": snapshot["prior_win_rate"],
             "win_streak": snapshot["win_streak"],
             "loss_streak": snapshot["loss_streak"],

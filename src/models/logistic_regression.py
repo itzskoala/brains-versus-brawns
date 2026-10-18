@@ -3,7 +3,7 @@ from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import accuracy_score, log_loss, mean_squared_error, roc_auc_score
 
 from src.data.splitting import walk_forward_splits
-from src.features.engineering import MAIN_DIVISIONS, engineer_fold_features
+from src.features.engineering import MAIN_DIVISIONS, engineer_fold_features, is_predictable_outcome
 from src.features.imputation import apply_imputer, fit_imputer, missing_indicator_columns
 from src.features.scaling import apply_scaler, fit_scaler
 
@@ -156,6 +156,12 @@ def _symmetrize(df, feature_columns, symmetric_columns=SYMMETRIC_FEATURE_COLUMNS
 
     red = df.copy()
     red["label"] = (red["winner_id"] == red["r_fighter_id"]).astype(int)
+    # Which real fighter this row's perspective belongs to - lets a caller
+    # (e.g. a slice/calibration analysis over run_backtest's predictions)
+    # join a prediction row back to that specific fighter's own point-in-
+    # time features (prior_fights, etc.) without having to guess which of
+    # the two symmetrized rows per fight is "red" vs "blue".
+    red["fighter_id"] = red["r_fighter_id"]
     red_pairs = pd.DataFrame({
         f"{side}_{base}": red[col]
         for base in PAIRED_BASES
@@ -165,6 +171,7 @@ def _symmetrize(df, feature_columns, symmetric_columns=SYMMETRIC_FEATURE_COLUMNS
 
     blue = df.copy()
     blue["label"] = (blue["winner_id"] == blue["b_fighter_id"]).astype(int)
+    blue["fighter_id"] = blue["b_fighter_id"]
     blue[antisymmetric_columns] = -blue[antisymmetric_columns]
     blue_pairs = pd.DataFrame({
         f"{side}_{base}": blue[col]
@@ -203,6 +210,12 @@ def run_backtest(fights, rounds=None, freq="Y", min_train_size=500, C=1.0, featu
 
     for period, train, test in walk_forward_splits(fights, freq=freq, min_train_size=min_train_size):
         train, test = engineer_fold_features(train, test, rounds=rounds)
+        # Hard constraint: never a training/evaluation example for a draw,
+        # no-contest, DQ, or overturned result - see is_predictable_outcome.
+        # Already-computed history features above are unaffected: this only
+        # drops which rows become (X, y) pairs, not what fed their history.
+        train = train[is_predictable_outcome(train)]
+        test = test[is_predictable_outcome(test)]
         train = _symmetrize(train, feature_columns)
         test = _symmetrize(test, feature_columns)
 
@@ -257,6 +270,7 @@ def run_backtest(fights, rounds=None, freq="Y", min_train_size=500, C=1.0, featu
             predictions.append(pd.DataFrame({
                 "period": str(period),
                 "fight_id": test["fight_id"].values,
+                "fighter_id": test["fighter_id"].values,
                 "y_true": y_test.values,
                 "y_pred": preds,
                 "y_prob": probs,
@@ -266,7 +280,7 @@ def run_backtest(fights, rounds=None, freq="Y", min_train_size=500, C=1.0, featu
     metrics = pd.DataFrame(results)
     if return_predictions:
         predictions_df = pd.concat(predictions, ignore_index=True) if predictions else pd.DataFrame(
-            columns=["period", "fight_id", "y_true", "y_pred", "y_prob"])
+            columns=["period", "fight_id", "fighter_id", "y_true", "y_pred", "y_prob"])
         return metrics, predictions_df
     return metrics
 

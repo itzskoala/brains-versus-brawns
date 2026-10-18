@@ -48,9 +48,13 @@ def clean_fights(df):
     """Clean the fight-level dataset (master.csv). Returns a new DataFrame."""
     df = df.copy()
 
-    # winner_id is null only for draws/no-contests - there is no target to
-    # learn from these rows, so they are dropped rather than imputed.
-    df = df[df["winner_id"].notna()]
+    # winner_id is null only for draws/no-contests - there is no WINNER to
+    # learn from these rows, but they are real fights with real recorded
+    # action (strikes, takedowns, etc.) and are kept: result_status ("win"/
+    # "draw"/"no_contest") is the source of truth for outcome from here on,
+    # not winner_id alone. src.features.engineering derives win/loss/draw/
+    # no-contest from result_status + winner_id together (see
+    # _add_outcome_flags) rather than treating a null winner_id as a loss.
 
     for col in ["r_height", "b_height"]:
         df[col] = parse_height_to_inches(df[col])
@@ -66,11 +70,16 @@ def clean_fights(df):
     df["b_stance"] = df["b_stance"].fillna("Unknown")
     df["referee"] = df["referee"].fillna("Unknown")
 
-    # not useful for modeling - dropped rather than cleaned.
+    # not useful for modeling - dropped rather than cleaned. details is kept
+    # (not dropped): it's the only record of WHY a DQ/no-contest happened
+    # (e.g. "Eye Poke by Jones", "Failed Drug Test by Jason") and the API/
+    # frontend past-meetings display surfaces it - see src/features/
+    # snapshot.py find_past_meetings and api/main.py.
     df = df.drop(columns=[
         "r_fighter_nick_name", "b_fighter_nick_name",
-        "details", "bonuses", "event_location",
+        "bonuses", "event_location",
     ])
+    df["details"] = df["details"].fillna("")
 
     # dates were plain strings - needed as datetime for age/time-based features.
     df["event_date"] = pd.to_datetime(df["event_date"])

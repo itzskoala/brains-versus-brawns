@@ -6,20 +6,22 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "src" / "features"))
 
-from engineering import FIGHT_STAT_COLUMNS, add_early_pace_features, engineer_fold_features
+from engineering import FIGHT_STAT_COLUMNS, add_early_pace_features, engineer_fold_features, is_predictable_outcome
 
 
 def make_fight(fight_id, date, r_id, b_id, winner_id, method_label="decision_unanimous",
-                finish_round=3, rounds_fought=3, r_stance="Orthodox", b_stance="Orthodox"):
+                finish_round=3, finish_time=300, rounds_fought=3, r_stance="Orthodox", b_stance="Orthodox",
+                result_status="win"):
     fight = {
         "fight_id": fight_id, "event_date": pd.Timestamp(date),
         "r_fighter_id": r_id, "b_fighter_id": b_id, "winner_id": winner_id,
+        "result_status": result_status,
         "r_dob": pd.Timestamp("1990-01-01"), "b_dob": pd.Timestamp("1990-01-01"),
         "r_height": 70, "b_height": 70, "r_reach_inches": 70, "b_reach_inches": 70,
         "r_weight_lbs": 170, "b_weight_lbs": 170, "weight_class": "Lightweight",
         "r_stance": r_stance, "b_stance": b_stance,
         "method_label": method_label, "finish_round": finish_round,
-        "finish_time": 300, "rounds_fought": rounds_fought,
+        "finish_time": finish_time, "rounds_fought": rounds_fought,
     }
     for r_col, b_col in FIGHT_STAT_COLUMNS.values():
         fight[r_col] = 0
@@ -208,15 +210,154 @@ def test_same_date_fights_do_not_leak_into_each_other():
         assert by_id.loc["f3", "r_prior_wins"] == 2
 
 
-def test_missing_winner_id_raises_instead_of_silently_scoring_a_loss():
-    # a draw/no-contest (winner_id null) must never reach is_winner
-    # computation - clean_fights is supposed to drop these rows first.
-    bad = make_fight("f1", "2020-01-01", "X", "A", "X")
-    bad["winner_id"] = None
+def test_unrecognized_result_status_raises_instead_of_silently_mislabeling():
+    # result_status (not winner_id alone - see _add_outcome_flags) is what
+    # distinguishes a loss from a draw/no-contest. A value outside
+    # "win"/"draw"/"no_contest" means something upstream broke (clean_fights
+    # is supposed to always produce one of these three) - fail loudly rather
+    # than silently mislabel every outcome.
+    bad = make_fight("f1", "2020-01-01", "X", "A", "X", result_status="bogus")
     train = pd.DataFrame([bad])
 
     with pytest.raises(AssertionError):
         engineer_fold_features(train, train.iloc[0:0])
+
+
+def test_draw_counts_as_neither_a_win_nor_a_loss_for_win_rate():
+    # X: win, then a draw -> prior_win_rate entering the 3rd fight excludes
+    # the draw from the denominator (1 win / 1 decided fight = 1.0, not
+    # 1/2), while prior_fights still counts all 2 and prior_draw_rate
+    # reflects the draw.
+    train = pd.DataFrame([
+        make_fight("f1", "2020-01-01", "X", "A", "X"),
+        make_fight("f2", "2020-02-01", "X", "B", None, result_status="draw"),
+    ])
+    test = pd.DataFrame([make_fight("f3", "2020-03-01", "X", "C", "X")])
+
+    _, test_out = engineer_fold_features(train, test)
+
+    f3 = test_out[test_out["fight_id"] == "f3"].iloc[0]
+    assert f3["r_prior_fights"] == 2
+    assert f3["r_prior_wins"] == 1
+    assert f3["r_prior_win_rate"] == 1.0
+    assert f3["r_prior_draw_rate"] == 0.5
+    assert f3["r_prior_no_contest_rate"] == 0.0
+
+
+def test_no_contest_counts_as_neither_a_win_nor_a_loss_for_win_rate():
+    train = pd.DataFrame([
+        make_fight("f1", "2020-01-01", "X", "A", "X"),
+        make_fight("f2", "2020-02-01", "X", "B", None, result_status="no_contest"),
+    ])
+    test = pd.DataFrame([make_fight("f3", "2020-03-01", "X", "C", "X")])
+
+    _, test_out = engineer_fold_features(train, test)
+
+    f3 = test_out[test_out["fight_id"] == "f3"].iloc[0]
+    assert f3["r_prior_fights"] == 2
+    assert f3["r_prior_wins"] == 1
+    assert f3["r_prior_win_rate"] == 1.0
+    assert f3["r_prior_no_contest_rate"] == 0.5
+    assert f3["r_prior_draw_rate"] == 0.0
+
+
+def test_draw_and_no_contest_do_not_count_as_a_loss_for_opponent_either():
+    # B was on the other side of X's draw and no-contest - neither counts
+    # as a win OR a loss for B, same as for X.
+    train = pd.DataFrame([
+        make_fight("f1", "2020-01-01", "X", "B", None, result_status="draw"),
+        make_fight("f2", "2020-02-01", "C", "B", None, result_status="no_contest"),
+    ])
+    test = pd.DataFrame([make_fight("f3", "2020-03-01", "B", "D", "D")])
+
+    _, test_out = engineer_fold_features(train, test)
+
+    f3 = test_out[test_out["fight_id"] == "f3"].iloc[0]
+    assert f3["r_prior_fights"] == 2
+    assert f3["r_prior_wins"] == 0
+    assert pd.isna(f3["r_prior_win_rate"])  # 0 decided fights -> no rate, not 0.0
+    assert f3["r_prior_draw_rate"] == 0.5
+    assert f3["r_prior_no_contest_rate"] == 0.5
+
+
+def test_win_loss_streaks_reset_on_a_draw_not_extended_as_a_loss():
+    # X: win, win, draw, win -> entering the 4th fight, the draw must have
+    # broken the win streak (not left it at 2) AND must not itself start a
+    # loss streak (a draw is not a loss) - both streaks are 0 entering f4.
+    train = pd.DataFrame([
+        make_fight("f1", "2020-01-01", "X", "A", "X"),
+        make_fight("f2", "2020-02-01", "X", "B", "X"),
+        make_fight("f3", "2020-03-01", "X", "C", None, result_status="draw"),
+    ])
+    test = pd.DataFrame([make_fight("f4", "2020-04-01", "X", "D", "X")])
+
+    _, test_out = engineer_fold_features(train, test)
+
+    f4 = test_out[test_out["fight_id"] == "f4"].iloc[0]
+    assert f4["r_win_streak"] == 0
+    assert f4["r_loss_streak"] == 0
+
+
+def test_draw_and_no_contest_stats_still_count_toward_career_totals():
+    # Per the user's explicit ask: strikes/other action recorded before a
+    # draw/no-contest must still accumulate into career stat totals - only
+    # the win/loss outcome bookkeeping changes, not the stat volume.
+    draw = make_fight("f1", "2020-01-01", "X", "A", None, result_status="draw",
+                       rounds_fought=2, finish_round=2, finish_time=0)
+    draw["r_total_sig_landed"] = 20  # over 1 full round = 5 min
+    nc = make_fight("f2", "2020-02-01", "X", "B", None, result_status="no_contest",
+                     rounds_fought=2, finish_round=2, finish_time=0)
+    nc["r_total_sig_landed"] = 5  # over 1 full round = 5 min
+
+    train = pd.DataFrame([draw, nc])
+    test = pd.DataFrame([make_fight("f3", "2020-03-01", "X", "C", "X")])
+
+    _, test_out = engineer_fold_features(train, test)
+
+    f3 = test_out[test_out["fight_id"] == "f3"].iloc[0]
+    # 20 + 5 = 25 sig str landed over 5 + 5 = 10 minutes.
+    assert f3["r_sig_str_landed_per_min"] == pytest.approx(25 / 10)
+
+
+def test_prior_record_counts_wins_losses_draws_and_no_contests_separately():
+    # X: win, loss, draw, no-contest, DQ win (counts as an ordinary win,
+    # same as any other decided fight) -> entering the 6th fight: 2 wins,
+    # 1 loss, 1 draw, 1 no-contest, out of 5 prior fights.
+    train = pd.DataFrame([
+        make_fight("f1", "2020-01-01", "X", "A", "X"),
+        make_fight("f2", "2020-02-01", "X", "B", "B"),
+        make_fight("f3", "2020-03-01", "X", "C", None, result_status="draw"),
+        make_fight("f4", "2020-04-01", "X", "D", None, result_status="no_contest"),
+        make_fight("f5", "2020-05-01", "X", "E", "X", method_label="dq"),
+    ])
+    test = pd.DataFrame([make_fight("f6", "2020-06-01", "X", "F", "X")])
+
+    _, test_out = engineer_fold_features(train, test)
+
+    f6 = test_out[test_out["fight_id"] == "f6"].iloc[0]
+    assert f6["r_prior_fights"] == 5
+    assert f6["r_prior_wins"] == 2
+    assert f6["r_prior_losses"] == 1
+    assert f6["r_prior_draws"] == 1
+    assert f6["r_prior_no_contests"] == 1
+
+
+def test_finish_tendency_counts_a_draws_method_but_not_as_a_win():
+    # X's prior fight was a majority-decision draw - it must count toward
+    # prior_decision_majority_rate (the fight really did end that way) but
+    # NOT toward prior_win_decision_majority_rate (nobody won it).
+    train = pd.DataFrame([
+        make_fight("f1", "2020-01-01", "X", "A", None, result_status="draw", method_label="decision_majority"),
+    ])
+    test = pd.DataFrame([make_fight("f2", "2020-02-01", "X", "B", "X")])
+
+    _, test_out = engineer_fold_features(train, test)
+
+    f2 = test_out[test_out["fight_id"] == "f2"].iloc[0]
+    assert f2["r_prior_decision_majority_rate"] == 1.0
+    # 0 prior wins -> 0/0, a real "no rate to compute" NaN, not a 0.0 that
+    # would claim X has a known 0% win-by-this-method rate.
+    assert pd.isna(f2["r_prior_win_decision_majority_rate"])
 
 
 def test_early_pace_feature_still_populates_when_the_current_fight_lacks_round_detail():
@@ -257,6 +398,21 @@ def test_feature_engineering_is_reproducible_regardless_of_input_row_order():
     a = forward.set_index("fight_id").sort_index()
     b = shuffled.set_index("fight_id").sort_index()[a.columns]
     pd.testing.assert_frame_equal(a, b)
+
+
+def test_is_predictable_outcome_true_for_an_ordinary_win():
+    rows = pd.DataFrame([make_fight("f1", "2020-01-01", "X", "A", "X")])
+    assert list(is_predictable_outcome(rows)) == [True]
+
+
+def test_is_predictable_outcome_false_for_draw_no_contest_dq_and_overturned():
+    rows = pd.DataFrame([
+        make_fight("f1", "2020-01-01", "X", "A", None, result_status="draw"),
+        make_fight("f2", "2020-01-01", "X", "A", None, result_status="no_contest"),
+        make_fight("f3", "2020-01-01", "X", "A", "X", method_label="dq"),
+        make_fight("f4", "2020-01-01", "X", "A", None, result_status="no_contest", method_label="overturned"),
+    ])
+    assert list(is_predictable_outcome(rows)) == [False, False, False, False]
 
 
 def test_stance_mismatch_flags_orthodox_vs_southpaw_only():

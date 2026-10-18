@@ -279,6 +279,67 @@ XGBoost is the best of the three on every metric, by a modest margin. All three 
 
 ---
 
+## Decision — Complete fight data (draws/no-contests preserved) + a hard "red/blue only" prediction constraint
+
+**Decision:** `src/data/cleaning.py clean_fights` no longer drops the 204 (118 no-contest + 86
+draw) fights whose `winner_id` is null - it now keeps every fight and relies on `result_status`
+("win"/"draw"/"no_contest") as the source of truth for outcome, not `winner_id` alone. `details`
+(the foul/overturn description) is kept too, not dropped. `src/features/engineering.py` gained
+`_add_outcome_flags` (derives win/loss/draw/no-contest the same way everywhere, replacing three
+separately-written `is_winner = (winner_id == fighter_id)` blocks) and `is_predictable_outcome`
+- a hard filter every `run_backtest`/`nested_validation`/`fit_final_model`/`feature_selection`/
+`missing_value_comparison`/`representation_comparison` call applies to its fold's rows, *after*
+`engineer_fold_features` (so history stays complete) but *before* fitting/scoring: a draw,
+no-contest, DQ, or overturned result is never an (X, y) training or evaluation example, by
+explicit instruction - the model must only ever predict Red or Blue. `api/main.py`'s past-meetings
+winner label and `frontend/gradio.py`'s `_format_meeting` were updated to a 4-way
+red/blue/draw/no_contest outcome (previously a binary ternary that silently mislabeled every
+draw/no-contest as a blue win, since `winner_id == red_id` is False for both). New display fields:
+each fighter's `prior_losses`/`prior_draws`/`prior_no_contests` (raw counts, not just rates) are
+now in `build_display_stats`'s `record` dict and rendered in the Tale of the Tape as
+`W-L-D-NC (win%)` - `win_rate` itself excludes draws/no-contests from its denominator (standard
+sports-analytics convention: wins / (wins + losses), not wins / all fights).
+
+**Why:** the fight data itself (strikes, takedowns, round-by-round detail) was always complete for
+these 204 fights - only the *outcome bookkeeping* treated them as unusable and threw the whole row
+away, which also meant a fighter's subsequent career-history features (prior_fights, streaks,
+career rates) silently skipped any fight that ended in a draw or no-contest. Separately: a DQ or
+overturned result is decided by a rule violation, not fighting skill, and a draw/no-contest has no
+winner at all - training or scoring the model against any of these would mean learning from (and
+being judged against) outcomes it has no business trying to predict.
+
+**Baseline comparison (required before keeping this change):** re-ran `python -m
+src.models.persistence` (refits all three artifacts, hyperparameters preserved) after the change.
+Mean metrics are effectively unchanged from the pre-change baseline recorded the same day:
+
+| Model | accuracy before → after | log_loss before → after | roc_auc before → after |
+|---|---:|---:|---:|
+| Logistic Regression | 0.6290 → 0.6292 | 0.6387 → 0.6389 | 0.6779 → 0.6781 |
+| Random Forest | ~0.627 → 0.6273 | ~0.648 → 0.6477 | ~0.669 → 0.6693 |
+| XGBoost | ~0.637 → 0.6370 | ~0.634 → 0.6340 | ~0.685 → 0.6846 |
+
+No regression - expected, since `FEATURE_COLUMNS` itself didn't change and the net effect on the
+*predictable* training set is small (just removing 36 DQ fights that were previously included,
+offset by slightly more accurate prior-history features for fighters who had a draw/NC in their
+past).
+
+**Alternatives considered:** keeping DQ fights as ordinary training/eval examples (their
+`winner_id` is real and non-null, so the "no label to learn from" argument that applies to
+draws/no-contests doesn't technically apply to DQ) - rejected per explicit instruction: a DQ
+outcome is still not a skill-based result, and conflating "has a label" with "is a fair thing to
+train on" would reintroduce exactly the kind of noise this change is meant to remove.
+
+**Consequences:** `tests/test_engineering.py` gained direct coverage of `is_predictable_outcome`
+and of draws/no-contests flowing correctly through every history feature (win-rate denominator,
+career-stat totals, streak resets, finish-tendency rates);
+`tests/test_train_predict_evaluate.py::test_run_backtest_never_trains_or_tests_on_a_non_predictable_outcome`
+proves the hard constraint end-to-end for all three models; `tests/test_api.py`/`tests/
+test_gradio.py` cover the 4-way past-meetings outcome and the W-L-D-NC record display. Full
+`tests/` suite passing after the change (240+). See `docs/features.md` for the full updated
+feature catalog.
+
+---
+
 # Lessons Learned
 
 Record useful lessons discovered during development.
@@ -312,6 +373,37 @@ Document known limitations of the data, Elo system, models, evaluation, API, or 
   `LOW_SAMPLE_FIGHT_THRESHOLD` (5) prior fights, so the UI doesn't present a 1-fight
   extrapolation with the same implied confidence as a 20-fight career rate. No feature
   engineering or model behavior changed.
+  **Follow-up (2026-10-18), a systematic version of the above:** the 2026-10-14 finding was one
+  hand-picked case. `src/evaluation/debutant_bias_analysis.py` (`python -m
+  src.evaluation.debutant_bias_analysis`) checks it at population scale, using only already
+  leakage-safe data (`logistic_regression.run_backtest(..., return_predictions=True)`'s genuinely
+  out-of-sample walk-forward predictions, joined to each prediction's own fighter's point-in-time
+  `prior_fights`): bucket every prediction by that fighter's own `prior_fights` and compare mean
+  predicted probability to actual win rate within the bucket (a standard reliability/calibration
+  check, `docs/scoping.md` section 8). Result, logistic regression, full 2003-2026 history:
+
+  | prior_fights bucket | n | mean predicted prob | actual win rate | overconfidence |
+  |---|---:|---:|---:|---:|
+  | 0 (true debutants) | 3649 | 0.4260 | 0.4272 | -0.0012 |
+  | 1-2 | 4704 | 0.5064 | 0.5111 | -0.0047 |
+  | 3-5 | 4494 | 0.5221 | 0.5125 | +0.0096 |
+  | 6-10 | 4253 | 0.5151 | 0.5420 | -0.0269 |
+  | 11+ | 4340 | 0.5176 | 0.4952 | +0.0225 |
+
+  **The debutant bucket shows no overconfidence at all** - predicted probability tracks actual win
+  rate to within 0.12 percentage points, the single smallest gap of any bucket, and if anything
+  slightly *under*confident rather than over. This contradicts the premise that the model is
+  systematically optimistic about low-experience fighters; it corroborates the 2026-10-14
+  single-case finding at scale instead. No evidence-backed reason to change `FEATURE_COLUMNS`,
+  the imputation strategy, or add a shrinkage/calibration layer - doing so without a demonstrated
+  bias would risk moving metrics for no reason, which the baseline-comparison discipline above
+  exists to catch. The likely real source of the "debutants seem to get optimistic predictions"
+  impression: individual high-profile/hyped debutant matchups are memorable precisely when the
+  model's prediction turns out wrong (survivorship in what people notice and mention), and the
+  existing low-sample-fight caveat lives in the Tale of the Tape table, not next to the win
+  probability headline itself where that impression actually forms - a UI placement gap, not a
+  model one. Left for a future pass if the product wants the caveat surfaced there too; not done
+  here since it wasn't the thing shown to be broken.
 * **`COMBINED_FEATURE_COLUMNS` (the production feature set for all three models) contains
   exact linear dependencies**: for every base in `PAIRED_BASES` (age, experience,
   prior_win_rate, win_streak, loss_streak, form_last5_win_rate, every career volume/style

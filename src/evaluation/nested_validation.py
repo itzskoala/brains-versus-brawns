@@ -2,7 +2,7 @@ import pandas as pd
 from sklearn.metrics import accuracy_score, log_loss, mean_squared_error, roc_auc_score
 
 from src.data.splitting import walk_forward_splits
-from src.features.engineering import engineer_fold_features
+from src.features.engineering import engineer_fold_features, is_predictable_outcome
 from src.features.imputation import apply_imputer, fit_imputer, missing_indicator_columns
 from src.features.scaling import apply_scaler, fit_scaler
 from src.models.logistic_regression import _symmetrize
@@ -77,6 +77,10 @@ def select_hyperparameters(train_fights, build_model, param_grid, feature_column
     inner_folds = []
     for _, inner_train, inner_test in walk_forward_splits(train_fights, freq=freq, min_train_size=min_train_size):
         inner_train, inner_test = engineer_fold_features(inner_train, inner_test, rounds=rounds)
+        # Hard constraint: never a training/evaluation example for a draw,
+        # no-contest, DQ, or overturned result - see is_predictable_outcome.
+        inner_train = inner_train[is_predictable_outcome(inner_train)]
+        inner_test = inner_test[is_predictable_outcome(inner_test)]
         inner_train = _symmetrize(inner_train, feature_columns)
         inner_test = _symmetrize(inner_test, feature_columns)
         inner_folds.append((inner_train, inner_test))
@@ -127,6 +131,10 @@ def run_nested_backtest(fights, build_model, param_grid, feature_columns, rounds
             freq=freq, min_train_size=inner_min_train_size)
 
         train_f, test_f = engineer_fold_features(train, test, rounds=rounds)
+        # Hard constraint: never a training/evaluation example for a draw,
+        # no-contest, DQ, or overturned result - see is_predictable_outcome.
+        train_f = train_f[is_predictable_outcome(train_f)]
+        test_f = test_f[is_predictable_outcome(test_f)]
         train_f = _symmetrize(train_f, feature_columns)
         test_f = _symmetrize(test_f, feature_columns)
 

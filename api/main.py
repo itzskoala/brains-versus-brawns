@@ -60,6 +60,20 @@ def _native(value):
     return value
 
 
+def _meeting_winner(meeting, red_fighter_id):
+    """"red"/"blue"/"draw"/"no_contest" for one past-meeting row. winner_id
+    is null for BOTH a draw and a no-contest, so this reads result_status
+    first rather than inferring the outcome from winner_id alone (which
+    would silently mislabel every draw/no-contest as a blue win - meeting["
+    winner_id"] == red_fighter_id is False for both a blue win and a
+    draw/NC)."""
+    if meeting["result_status"] == "draw":
+        return "draw"
+    if meeting["result_status"] == "no_contest":
+        return "no_contest"
+    return "red" if meeting["winner_id"] == red_fighter_id else "blue"
+
+
 def _build_fighter_index(fights, fighters_df):
     long = pd.concat([
         fights[["r_fighter_id", "weight_class", "event_date"]].rename(columns={"r_fighter_id": "fighter_id"}),
@@ -213,9 +227,9 @@ def predict(req: PredictRequest):
     # Rematches/trilogies: for every real fight already on record between
     # these two, show what the chosen model would have predicted right
     # before that specific fight (its own row excluded from history, cutoff
-    # = its own event_date) against what actually happened. Note: a meeting
-    # that was later overturned to a no-contest won't appear here -
-    # clean_fights already drops no-decision rows (no label to learn from).
+    # = its own event_date) against what actually happened - including a
+    # draw or no-contest, which clean_fights no longer drops (see
+    # src/data/cleaning.py).
     history = []
     past_meetings = find_past_meetings(fights, req.red_fighter_id, req.blue_fighter_id)
     for _, meeting in past_meetings.iterrows():
@@ -252,8 +266,14 @@ def predict(req: PredictRequest):
             "event_date": meeting_date,
             "predicted": predicted,
             "actual": {
-                "winner": "red" if meeting["winner_id"] == req.red_fighter_id else "blue",
+                # result_status ("win"/"draw"/"no_contest") - not winner_id
+                # alone - decides this: a draw and a no-contest both have a
+                # null winner_id, so "winner_id == red_fighter_id" being
+                # False does NOT mean blue won (see src/data/cleaning.py).
+                "winner": _meeting_winner(meeting, req.red_fighter_id),
+                "result_status": meeting["result_status"],
                 "method": meeting["method"],
+                "details": meeting["details"] or None,
                 "finish_round": meeting["finish_round"],
                 "finish_time_seconds": meeting["finish_time"],
                 "red": actual_fight_stats(meeting, req.red_fighter_id),
