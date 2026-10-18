@@ -187,6 +187,59 @@ def test_predict_happy_path_with_per_fighter_years(client):
     assert 0.0 <= meeting["predicted"]["red_win_probability"] <= 1.0
 
 
+# ---------------------------------------------------------------------------
+# Regression: UFC 214 (Cormier vs. Jones 2) was overturned to a no-contest
+# after the fact - a real historical case of exactly the outcome the hard
+# red/blue-only prediction constraint must never be trained/scored against,
+# while the UI must still retain and show what the model WOULD have
+# predicted beforehand, separately from the actual (non-)result.
+# ---------------------------------------------------------------------------
+
+def test_past_meeting_retains_predicted_winner_for_a_real_no_contest(client):
+    jones = _fighter_id(client, "Light Heavyweight", "Jon Jones")
+    cormier = _fighter_id(client, "Light Heavyweight", "Daniel Cormier")
+
+    resp = client.post("/predict", json={
+        "model_name": "xgboost_model",
+        "division": "Light Heavyweight",
+        "red_fighter_id": jones,
+        "red_year": None,
+        "blue_fighter_id": cormier,
+        "blue_year": None,
+    })
+    assert resp.status_code == 200
+    meetings = {m["event_name"]: m for m in resp.json()["past_meetings"]}
+    assert "UFC 214: Cormier vs. Jones 2" in meetings
+    ufc_214 = meetings["UFC 214: Cormier vs. Jones 2"]
+
+    # The actual result is correctly a no-contest, not a fabricated winner.
+    assert ufc_214["actual"]["winner"] == "no_contest"
+    assert ufc_214["actual"]["result_status"] == "no_contest"
+    assert ufc_214["actual"]["method"] == "Overturned"
+    assert ufc_214["actual"]["details"]  # the overturn reason, not dropped
+
+    # Fight stats recorded before the stoppage are still shown.
+    assert ufc_214["actual"]["red"]["sig_str_landed"] > 0 or ufc_214["actual"]["blue"]["sig_str_landed"] > 0
+
+    # The model's pre-fight Red/Blue prediction is retained and displayed
+    # separately - never suppressed just because the real outcome wasn't
+    # something the model can predict.
+    predicted = ufc_214["predicted"]
+    assert predicted is not None
+    assert predicted["predicted_winner"] in ("red", "blue")
+    assert 0.0 <= predicted["red_win_probability"] <= 1.0
+    assert predicted["red_win_probability"] + predicted["blue_win_probability"] == pytest.approx(1.0)
+
+    # No round/win-method model is trained yet (docs/tasks.md
+    # Recommendation) - these must be present but null, never a guessed
+    # value, so the frontend can render "Unavailable" rather than omit the
+    # fields entirely or silently invent a round/method.
+    assert "predicted_round" in predicted
+    assert "predicted_method" in predicted
+    assert predicted["predicted_round"] is None
+    assert predicted["predicted_method"] is None
+
+
 def test_predict_record_breaks_out_wins_losses_draws_and_no_contests_separately(client):
     jones = _fighter_id(client, "Light Heavyweight", "Jon Jones")
     cormier = _fighter_id(client, "Light Heavyweight", "Daniel Cormier")

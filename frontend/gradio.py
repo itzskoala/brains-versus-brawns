@@ -386,37 +386,66 @@ def _format_tale_of_the_tape(red_name, red_stats, blue_name, blue_stats, unit="l
 _OUTCOME_LABELS = {"red": "Red", "blue": "Blue", "draw": "Draw", "no_contest": "No Contest"}
 
 
-def _format_meeting(meeting):
+def _format_seconds(seconds):
+    """123 -> "2:03". None (missing) -> None - never a fabricated "0:00"."""
+    if seconds is None:
+        return None
+    minutes, secs = divmod(int(seconds), 60)
+    return f"{minutes}:{secs:02d}"
+
+
+def _format_meeting(meeting, red_name, blue_name):
+    """Predicted (model's own pre-fight Red/Blue call, kept exactly as the
+    model produced it - see api/main.py's predicted block) and Actual (the
+    real official result) are always shown separately, never blended: a
+    draw/no-contest/DQ/overturned result never overwrites or hides what the
+    model predicted beforehand, and the model's Red/Blue call never
+    overwrites the real official outcome. predicted_round/predicted_method
+    are None until the round/win-method targets exist (docs/tasks.md
+    Recommendation) - shown as "Unavailable", never guessed."""
     predicted = meeting["predicted"]
     actual = meeting["actual"]
-    winner_label = _OUTCOME_LABELS[actual["winner"]]
+    names = {"red": red_name, "blue": blue_name}
     decisive = actual["winner"] in ("red", "blue")
 
     if predicted is None:
         prediction_line = (
-            "Predicted (as of right before this fight): unavailable - one corner had no "
-            "fight history yet (likely their promotional debut).\n\n"
+            "Predicted: Unavailable - one corner had no fight history yet "
+            "(likely their promotional debut).\n\n"
         )
     else:
-        predicted_label = "Red" if predicted["predicted_winner"] == "red" else "Blue"
+        predicted_name = names[predicted["predicted_winner"]]
         if decisive:
             agree = "✅ model agreed" if predicted["predicted_winner"] == actual["winner"] else "❌ model disagreed"
         else:
             agree = "model predicts a red/blue winner only - it doesn't predict draws/no-contests"
+        predicted_round = predicted.get("predicted_round")
+        predicted_method = predicted.get("predicted_method")
+        # Two trailing spaces before the \n: CommonMark's hard-line-break
+        # syntax - a single bare \n renders as just a space (same
+        # paragraph), which ran "- agreed" straight into "Predicted round:"
+        # on one line (confirmed in-browser).
         prediction_line = (
-            f"Predicted (as of right before this fight): **{predicted_label}** to win "
+            f"Predicted: **{predicted_name}** to win "
             f"({predicted['red_win_probability'] * 100:.1f}% red / "
-            f"{predicted['blue_win_probability'] * 100:.1f}% blue) - {agree}\n\n"
+            f"{predicted['blue_win_probability'] * 100:.1f}% blue) - {agree}  \n"
+            f"Predicted round: {predicted_round if predicted_round is not None else 'Unavailable'} | "
+            f"Predicted method: {predicted_method if predicted_method is not None else 'Unavailable'}\n\n"
         )
 
-    outcome_phrase = (f"**{winner_label}** won by {actual['method']}" if decisive
-                       else f"**{winner_label}** ({actual['method']})")
+    time_str = _format_seconds(actual.get("finish_time_seconds"))
+    round_time = f"Round {actual['finish_round']}" + (f", {time_str}" if time_str else "")
     details_note = f" - {actual['details']}" if actual.get("details") else ""
+
+    if decisive:
+        outcome_phrase = f"**{names[actual['winner']]}** won by {actual['method']}"
+    else:
+        outcome_phrase = f"**{_OUTCOME_LABELS[actual['winner']]}** ({actual['method']})"
 
     return (
         f"### {meeting['event_name']} ({meeting['event_date']})\n"
         f"{prediction_line}"
-        f"Actual: {outcome_phrase} (round {actual['finish_round']}){details_note}\n\n"
+        f"Actual: {outcome_phrase}, {round_time}{details_note}\n\n"
         f"Actual fight stats - Red: {actual['red']['sig_str_landed']} sig. str landed, "
         f"{actual['red']['td_success']} TD | Blue: {actual['blue']['sig_str_landed']} sig. str landed, "
         f"{actual['blue']['td_success']} TD"
@@ -479,7 +508,7 @@ def predict(model_name, division, red_fighter_id, red_year, blue_fighter_id, blu
     tale_of_the_tape = _format_tale_of_the_tape(red_name, data["red_stats"], blue_name, data["blue_stats"], unit)
 
     if data["past_meetings"]:
-        history = "\n\n---\n\n".join(_format_meeting(m) for m in data["past_meetings"])
+        history = "\n\n---\n\n".join(_format_meeting(m, red_name, blue_name) for m in data["past_meetings"])
     else:
         history = "These two fighters have no completed fight on record against each other."
 

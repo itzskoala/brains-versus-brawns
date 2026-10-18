@@ -181,6 +181,149 @@ def test_filter_fighters_empty_query_returns_all():
     assert fg._filter_fighters(fighters, "") == fighters
 
 
+def _make_actual_fight_stats(sig_str_landed=10, td_success=1):
+    return {
+        "sig_str_landed": sig_str_landed, "sig_str_atmp": sig_str_landed + 5,
+        "td_success": td_success, "td_atmp": td_success + 1, "sub_att": 0,
+        "sig_str_landed_absorbed": 8, "sig_str_atmp_absorbed": 15,
+        "won": False, "method": "Overturned", "finish_round": 3, "finish_time_seconds": 120,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Regression: real UFC 214 (Cormier vs. Jones 2, overturned to a no-contest)
+# and other non-standard outcomes - the model's pre-fight Red/Blue
+# prediction must be retained and shown separately from the actual
+# official result, never suppressed and never forced into a fabricated
+# winner. See api/main.py's _meeting_winner / tests/test_api.py's
+# test_past_meeting_retains_predicted_winner_for_a_real_no_contest for the
+# same case at the API layer.
+# ---------------------------------------------------------------------------
+
+def _make_predicted(winner="red", red_prob=0.952, predicted_round=None, predicted_method=None):
+    return {
+        "predicted_winner": winner, "red_win_probability": red_prob, "blue_win_probability": 1 - red_prob,
+        "predicted_round": predicted_round, "predicted_method": predicted_method,
+    }
+
+
+def test_format_meeting_retains_predicted_winner_for_a_no_contest():
+    meeting = {
+        "event_name": "UFC 214: Cormier vs. Jones 2", "event_date": "2017-07-29",
+        "predicted": _make_predicted("red", 0.952),
+        "actual": {
+            "winner": "no_contest", "result_status": "no_contest", "method": "Overturned",
+            "details": "Failed Drug Test by Jones", "finish_round": 3, "finish_time_seconds": 181,
+            "red": _make_actual_fight_stats(95, 0), "blue": _make_actual_fight_stats(58, 0),
+        },
+    }
+    text = fg._format_meeting(meeting, "Jon Jones", "Daniel Cormier")
+
+    # the pre-fight prediction is retained and shown, not suppressed.
+    assert "Predicted" in text
+    assert "95.2% red" in text
+    assert "4.8% blue" in text
+    # no round/win-method model exists yet - shown as Unavailable, never guessed.
+    assert "Predicted round: Unavailable" in text
+    assert "Predicted method: Unavailable" in text
+    # never a fabricated agree/disagree against a non-existent winner.
+    assert "model agreed" not in text
+    assert "model disagreed" not in text
+    assert "doesn't predict draws/no-contests" in text
+    # the actual result is a no-contest, not a forced Red/Blue winner.
+    assert "**No Contest**" in text
+    assert "Overturned" in text
+    assert "Failed Drug Test by Jones" in text
+    assert "Round 3, 3:01" in text
+    # fight stats recorded before the stoppage are still shown.
+    assert "95 sig. str landed" in text
+
+
+def test_format_meeting_retains_predicted_winner_for_a_draw():
+    meeting = {
+        "event_name": "Some Event", "event_date": "2020-01-01",
+        "predicted": _make_predicted("blue", 0.4),
+        "actual": {
+            "winner": "draw", "result_status": "draw", "method": "Decision - Majority",
+            "details": None, "finish_round": 3, "finish_time_seconds": 300,
+            "red": _make_actual_fight_stats(20, 1), "blue": _make_actual_fight_stats(18, 1),
+        },
+    }
+    text = fg._format_meeting(meeting, "Red Fighter", "Blue Fighter")
+
+    assert "Predicted" in text
+    assert "40.0% red" in text
+    assert "**Draw**" in text
+    assert "model agreed" not in text
+    assert "model disagreed" not in text
+
+
+def test_format_meeting_dq_is_decisive_and_still_scored_agree_or_disagree():
+    # A DQ has a real Red/Blue winner (unlike a draw/no-contest), so the
+    # usual agree/disagree comparison against the prediction still applies,
+    # and the actual winner's real name (not "Blue") is shown.
+    meeting = {
+        "event_name": "Some Event", "event_date": "2020-01-01",
+        "predicted": _make_predicted("blue", 0.3),
+        "actual": {
+            "winner": "blue", "result_status": "win", "method": "DQ",
+            "details": "Illegal Elbows by Red Fighter", "finish_round": 2, "finish_time_seconds": 60,
+            "red": _make_actual_fight_stats(5, 0), "blue": _make_actual_fight_stats(10, 1),
+        },
+    }
+    text = fg._format_meeting(meeting, "Red Fighter", "Blue Fighter")
+
+    assert "✅ model agreed" in text
+    assert "**Blue Fighter** won by DQ" in text
+    assert "Round 2, 1:00" in text
+    assert "Illegal Elbows by Red Fighter" in text
+
+
+def test_format_meeting_shows_predicted_round_and_method_once_available():
+    # Future-proofing: once the round/win-method targets are trained
+    # (docs/tasks.md Recommendation), api/main.py populates these instead
+    # of None - the frontend must show the real values, not "Unavailable".
+    meeting = {
+        "event_name": "Some Event", "event_date": "2020-01-01",
+        "predicted": _make_predicted("red", 0.8, predicted_round=2, predicted_method="KO/TKO"),
+        "actual": {
+            "winner": "red", "result_status": "win", "method": "KO/TKO",
+            "details": None, "finish_round": 2, "finish_time_seconds": 90,
+            "red": _make_actual_fight_stats(30, 0), "blue": _make_actual_fight_stats(10, 0),
+        },
+    }
+    text = fg._format_meeting(meeting, "Red Fighter", "Blue Fighter")
+    assert "Predicted round: 2" in text
+    assert "Predicted method: KO/TKO" in text
+    assert "Unavailable" not in text
+
+
+def test_format_meeting_no_details_omits_the_dash_note():
+    meeting = {
+        "event_name": "Some Event", "event_date": "2020-01-01",
+        "predicted": None,
+        "actual": {
+            "winner": "red", "result_status": "win", "method": "Decision - Unanimous",
+            "details": None, "finish_round": 3, "finish_time_seconds": 300,
+            "red": _make_actual_fight_stats(20, 1), "blue": _make_actual_fight_stats(15, 0),
+        },
+    }
+    text = fg._format_meeting(meeting, "Red Fighter", "Blue Fighter")
+    assert "Predicted: Unavailable" in text
+    assert "**Red Fighter** won by Decision - Unanimous" in text
+    assert "Round 3, 5:00" in text
+
+
+def test_format_seconds_formats_minutes_and_seconds():
+    assert fg._format_seconds(0) == "0:00"
+    assert fg._format_seconds(61) == "1:01"
+    assert fg._format_seconds(181) == "3:01"
+
+
+def test_format_seconds_none_stays_none_not_a_fabricated_zero():
+    assert fg._format_seconds(None) is None
+
+
 def _make_stats(prior_fights, prior_wins=0, prior_draws=0, prior_no_contests=0):
     # minimal build_display_stats-shaped dict - only the fields
     # _format_tale_of_the_tape/_low_sample_caveat actually read.

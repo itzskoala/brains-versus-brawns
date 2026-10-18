@@ -249,6 +249,14 @@ def predict(req: PredictRequest):
                 "red_win_probability": historical_red_prob,
                 "blue_win_probability": 1 - historical_red_prob,
                 "predicted_winner": "red" if historical_red_prob >= 0.5 else "blue",
+                # Reserved for the round/win-method prediction targets
+                # (docs/tasks.md Recommendation - "New prediction targets")
+                # - not yet trained, so always None/unavailable for now
+                # rather than guessed. Once those models exist, this is the
+                # only place that needs to change to populate them for
+                # real; the frontend already renders None as "Unavailable".
+                "predicted_round": None,
+                "predicted_method": None,
                 "red_stats": red_pre_fight,
                 "blue_stats": blue_pre_fight,
             }

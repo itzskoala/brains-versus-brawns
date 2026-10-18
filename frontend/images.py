@@ -60,7 +60,7 @@ WIKIPEDIA_SUMMARY_URL = "https://en.wikipedia.org/api/rest_v1/page/summary/{titl
 # Wikipedia's API etiquette explicitly asks for an identifying User-Agent
 # (the opposite of ufc.com's USER_AGENT above, which blends in as a normal
 # browser) - https://www.mediawiki.org/wiki/API:Etiquette.
-WIKIPEDIA_USER_AGENT = "ufc-elo-matchup-predictor/1.0 (personal ML project; contact: kotal008@umn.edu)"
+WIKIPEDIA_USER_AGENT = "ufc-elo-matchup-predictor/1.0 (personal ML project; contact: sri.kotala@gmail.com)"
 PHOTO_SIZE_PX = 220
 CACHE_FILE_PATH = Path(__file__).resolve().parent.parent / "data" / "fighter_image_cache.json"
 
