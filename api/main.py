@@ -148,6 +148,21 @@ def load_state():
     _state["fighter_index"] = _build_fighter_index(fights, fighters_df)
     _state["models"] = {name: load_model_artifact(name) for name in MODEL_NAMES}
 
+    # Round/win-method targets (docs/tasks.md "New prediction targets"
+    # Recommendation) - one pair of artifacts per MODEL_NAMES entry, saved
+    # by src.evaluation.multiclass_backtest as "<model_name>_round"/
+    # "<model_name>_method". Loaded only if present: an older models/
+    # directory without these yet must not crash startup - _predict_multiclass
+    # falls back to None (the frontend already renders that as "Unavailable").
+    _state["multiclass_models"] = {}
+    for name in MODEL_NAMES:
+        for target in ("round", "method"):
+            artifact_name = f"{name}_{target}"
+            try:
+                _state["multiclass_models"][artifact_name] = load_model_artifact(artifact_name)
+            except FileNotFoundError:
+                pass
+
 
 class PredictRequest(BaseModel):
     model_name: str
@@ -176,6 +191,45 @@ def _predict(model_name, division, red_fighter_id, red_cutoff, blue_fighter_id, 
 
     red_win_probability = float(model.predict_proba(X)[0, 1])
     return red_win_probability
+
+
+# method_bucket's internal keys (src.features.engineering.METHOD_BUCKET_MAP)
+# to a display label - never invented, just the same coarse buckets
+# build_display_stats' method_of_victory already shows.
+_METHOD_DISPLAY = {"ko_tko": "KO/TKO", "submission": "Submission", "decision": "Decision", "other": "Other"}
+
+
+def _predict_multiclass(artifact_key, division, red_fighter_id, red_cutoff, blue_fighter_id, blue_cutoff,
+                         fights, fighters_df, static_features=None):
+    """The single most-likely class for a round or win-method artifact
+    (meta["classes"], decoded from the model's integer prediction - see
+    src.evaluation.multiclass_backtest), or None if artifact_key has no
+    saved artifact at all (an older models/ directory, or - per the hard
+    red/blue-only constraint - this was never trained for anything but a
+    predictable outcome, which is the only kind of fight this is ever
+    called for anyway). Mirrors _predict's snapshot-based feature
+    construction exactly; never substitutes a guess for a missing
+    artifact - the caller gets None back and must pass that through
+    as-is, not silently invent a round/method."""
+    artifact = _state["multiclass_models"].get(artifact_key)
+    if artifact is None:
+        return None
+    model, scaler, imputer, meta = artifact
+    feature_columns = meta["feature_columns"]
+    fitted_feature_columns = meta.get("fitted_feature_columns", feature_columns)
+    classes = meta["classes"]
+
+    red_snapshot = build_fighter_snapshot(fights, fighters_df, red_fighter_id, red_cutoff, division)
+    blue_snapshot = build_fighter_snapshot(fights, fighters_df, blue_fighter_id, blue_cutoff, division)
+    feats = build_matchup_features(red_snapshot, blue_snapshot, division, fitted_feature_columns,
+                                    imputer=imputer, static_features=static_features)
+
+    X = pd.DataFrame([feats])[fitted_feature_columns]
+    if scaler is not None:
+        X = apply_scaler(X, fitted_feature_columns, scaler)
+
+    predicted_idx = int(model.predict(X)[0])
+    return classes[predicted_idx]
 
 
 @app.get("/divisions")
@@ -241,6 +295,26 @@ def predict(req: PredictRequest):
         try:
             historical_red_prob = _predict(req.model_name, meeting_division, req.red_fighter_id, meeting_date,
                                             req.blue_fighter_id, meeting_date, trimmed_fights, fighters_df)
+
+            # rounds_scheduled is a fight-level fact (3 vs. 5 scheduled
+            # rounds), not derivable from either fighter's own snapshot -
+            # read directly off this REAL historical fight's own row
+            # (fights_with_features, not trimmed_features, since trimming
+            # excludes the meeting itself). See
+            # src.features.engineering.add_fight_outcome_targets.
+            meeting_rounds_scheduled = fights_with_features.loc[
+                fights_with_features["fight_id"] == meeting["fight_id"], "rounds_scheduled"]
+            meeting_rounds_scheduled = (
+                meeting_rounds_scheduled.iloc[0] if not meeting_rounds_scheduled.empty else None)
+
+            predicted_round = _predict_multiclass(
+                f"{req.model_name}_round", meeting_division, req.red_fighter_id, meeting_date,
+                req.blue_fighter_id, meeting_date, trimmed_fights, fighters_df,
+                static_features={"rounds_scheduled": meeting_rounds_scheduled})
+            predicted_method = _predict_multiclass(
+                f"{req.model_name}_method", meeting_division, req.red_fighter_id, meeting_date,
+                req.blue_fighter_id, meeting_date, trimmed_fights, fighters_df)
+
             red_pre_fight = build_display_stats(trimmed_fights, trimmed_features, fighters_df,
                                                  req.red_fighter_id, meeting_date, meeting_division)
             blue_pre_fight = build_display_stats(trimmed_fights, trimmed_features, fighters_df,
@@ -249,14 +323,10 @@ def predict(req: PredictRequest):
                 "red_win_probability": historical_red_prob,
                 "blue_win_probability": 1 - historical_red_prob,
                 "predicted_winner": "red" if historical_red_prob >= 0.5 else "blue",
-                # Reserved for the round/win-method prediction targets
-                # (docs/tasks.md Recommendation - "New prediction targets")
-                # - not yet trained, so always None/unavailable for now
-                # rather than guessed. Once those models exist, this is the
-                # only place that needs to change to populate them for
-                # real; the frontend already renders None as "Unavailable".
-                "predicted_round": None,
-                "predicted_method": None,
+                # None only if this model_name has no round/method artifact
+                # at all (see _predict_multiclass) - never a guessed value.
+                "predicted_round": predicted_round,
+                "predicted_method": _METHOD_DISPLAY.get(predicted_method, predicted_method),
                 "red_stats": red_pre_fight,
                 "blue_stats": blue_pre_fight,
             }

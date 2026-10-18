@@ -21,7 +21,7 @@ def make_fight(fight_id, date, r_id, b_id, winner_id, method_label="decision_una
         "r_height": 70, "b_height": 70, "r_reach_inches": 70, "b_reach_inches": 70,
         "r_weight_lbs": 170, "b_weight_lbs": 170, "weight_class": "Lightweight",
         "r_stance": r_stance, "b_stance": b_stance,
-        "method_label": method_label, "finish_round": finish_round,
+        "method_label": method_label, "finish_round": finish_round, "time_format": "3 Rnd (5-5-5)",
         "finish_time": 300, "rounds_fought": rounds_fought,
     }
     for r_col, b_col in FIGHT_STAT_COLUMNS.values():

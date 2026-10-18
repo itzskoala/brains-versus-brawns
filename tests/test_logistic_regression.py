@@ -20,7 +20,7 @@ def make_fight(fight_id, date, r_id, b_id, winner_id, r_reach_inches=70, b_reach
         "r_height": 70, "b_height": 72, "r_reach_inches": r_reach_inches, "b_reach_inches": b_reach_inches,
         "r_weight_lbs": 170, "b_weight_lbs": 185, "weight_class": weight_class,
         "r_stance": "Orthodox", "b_stance": "Orthodox",
-        "method_label": "decision_unanimous", "finish_round": 3,
+        "method_label": "decision_unanimous", "finish_round": 3, "time_format": "3 Rnd (5-5-5)",
         "finish_time": 300, "rounds_fought": 3,
     }
     for r_col, b_col in FIGHT_STAT_COLUMNS.values():

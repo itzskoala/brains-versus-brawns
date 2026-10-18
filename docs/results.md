@@ -340,6 +340,69 @@ feature catalog.
 
 ---
 
+## Decision — Round and win-method prediction targets, for all three model families
+
+**Decision:** Implemented the "New prediction targets" Recommendation above, extended per explicit
+instruction to cover `logistic_regression`, `random_forest`, and `xgboost_model` (not just
+logistic_regression as originally scoped). `src/evaluation/multiclass_backtest.py` generalizes the
+walk-forward backtest + final-fit from the binary winner target to any multiclass target -
+`method_bucket` (`src/features/engineering.py`'s coarse ko_tko/submission/decision/other bucketing,
+the same one `_format_tale_of_the_tape`'s `wins_by_method` already displays) and `finish_round`
+(with a new `rounds_scheduled` feature, parsed from `time_format`, so the model isn't blind to why
+some fights can only end at round 5). Same leakage-safety contract as every binary `run_backtest`:
+`is_predictable_outcome` excludes draws/no-contests/DQs/overturned results from training AND
+evaluation for these targets too - round/method are exactly as undefined for those outcomes as a
+winner is. Hyperparameters were reused from each model's existing winner-target artifact rather
+than run through a fresh nested search (see Status note on the Recommendation above). 6 new
+artifacts saved: `models/<model_name>_round.json`/`.joblib`, `models/<model_name>_method.json`/
+`.joblib`.
+
+**Baseline comparison (required before keeping this change):**
+
+| Model | Target | Mean accuracy | Majority-class baseline | Folds beating baseline |
+|---|---|---:|---:|---:|
+| Logistic Regression | method | 0.4714 | 0.4302 | 20/24 |
+| Logistic Regression | round | 0.5189 | 0.4552 | 18/24 |
+| Random Forest | method | 0.4668 | 0.4302 | 20/24 |
+| Random Forest | round | 0.5040 | 0.4552 | 18/24 |
+| XGBoost | method | 0.4663 | 0.4302 | 19/24 |
+| XGBoost | round | 0.5311 | 0.4552 | 19/24 |
+
+Every one of the 6 new models beats its own majority-class baseline on a clear majority of the 24
+walk-forward folds - a real, modest lift (round/method are genuinely harder to call than a binary
+winner), not a baseline-matching no-op. None regress the existing winner-target models: `models/
+<model_name>.json`'s own metrics (accuracy/log_loss/roc_auc) are untouched by this change -
+`FEATURE_COLUMNS`/hyperparameters for the winner target were not modified.
+
+**Wiring:** `api/main.py`'s past-meetings `predicted` block now populates `predicted_round`
+(the real class, an int) and `predicted_method` (display-mapped: "KO/TKO"/"Submission"/"Decision"/
+"Other") via a new `_predict_multiclass` helper, computed for every past meeting alongside the
+existing winner probability - including non-standard outcomes (draws/no-contests/DQs), where the
+model's own pre-fight round/method call is retained exactly like the winner call, never suppressed
+just because the real result isn't one the model predicts. `rounds_scheduled` (a fight-level fact,
+not derivable from either fighter's snapshot) is read directly off that real historical fight's own
+row rather than guessed - `src/features/snapshot.py build_matchup_features` gained a `static_features`
+parameter for exactly this case. `frontend/gradio.py` needed zero changes - the "Unavailable"
+fallback built for this exact gap (see the historical-fight-display Decision above) already renders
+a real value once one is provided.
+
+**Alternatives considered:** training with `nested_validation.py`'s full inner/outer tuning search
+instead of reusing each model's existing hyperparameters - rejected for this pass as unnecessary
+retraining cost (6 models x a multi-candidate grid x inner folds) for two brand-new targets with no
+prior baseline to protect; the existing hyperparameters were chosen for a similar bias/variance
+tradeoff on the same feature set, a reasonable starting point. Logged as a legitimate follow-up if a
+future pass wants to validate that choice for round/method specifically.
+
+**Consequences:** `tests/test_multiclass_backtest.py` (new) covers `_expand_proba`'s per-fold
+missing-class handling, the generalized backtest/final-fit on synthetic fixtures, and the hard
+constraint excluding non-predictable outcomes from this target too.
+`tests/test_api.py::test_past_meeting_predicted_round_and_method_appear_alongside_winner_probability`
+(parametrized across all three model families) proves round/method predictions appear alongside the
+winner probability for a real historical fight end-to-end. Full `tests/` suite passing after the
+change.
+
+---
+
 # Lessons Learned
 
 Record useful lessons discovered during development.

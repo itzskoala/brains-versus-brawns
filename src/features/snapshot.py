@@ -138,6 +138,10 @@ def build_fighter_snapshot(fights, fighters_df, fighter_id, as_of_date, weight_c
         "finish_time": 0,
         "rounds_fought": 0,
         "method_label": METHOD_LABELS[0],
+        # Never read back either (only r_* columns are, see this
+        # function's docstring) - add_fight_outcome_targets just needs a
+        # parseable value present.
+        "time_format": "3 Rnd (5-5-5)",
         "r_fighter_id": fighter_id,
         "r_height": attrs["height"],
         "r_weight_lbs": attrs["weight_lbs"],
@@ -160,7 +164,8 @@ def build_fighter_snapshot(fights, fighters_df, fighter_id, as_of_date, weight_c
     return {col[2:]: snapshot_row[col] for col in snapshot_row.index if col.startswith("r_")}
 
 
-def build_matchup_features(red_snapshot, blue_snapshot, weight_class, feature_columns, imputer=None):
+def build_matchup_features(red_snapshot, blue_snapshot, weight_class, feature_columns, imputer=None,
+                            static_features=None):
     """Assemble exactly the requested feature_columns (a saved model's own
     metadata.feature_columns - different saved artifacts want different
     sets, see models/*.json) from two independent fighter snapshots, the
@@ -180,12 +185,21 @@ def build_matchup_features(red_snapshot, blue_snapshot, weight_class, feature_co
     - "<col>_was_missing": 1 if <col> was NaN before filling, 0 otherwise -
       request it alongside <col> itself, same pairing
       src.features.imputation produces at training time.
+    - static_features: an optional {column: value} dict for fight-level
+      (not fighter-level) features neither snapshot can supply on its own -
+      e.g. "rounds_scheduled" (src.features.engineering
+      add_fight_outcome_targets) describes the FIGHT being evaluated, not
+      either fighter's history, so it can't be derived from a snapshot the
+      way every other feature here is. Caller-supplied, used verbatim (and
+      still subject to the same missing-value handling below if None) -
+      never guessed inside this function.
     Missing values are filled from imputer's training-fold fill values
     when one is given (matching how the model itself was trained);
     without one (an artifact saved before src.features.imputation
     existed), falls back to 0.0, matching the old flat fillna(0). Returns
     a plain dict, one entry per requested column."""
     orthodox_southpaw = {"Orthodox", "Southpaw"}
+    static_features = static_features or {}
 
     def reach_division_value(snapshot, suffix):
         return snapshot["reach_inches"] if weight_class == _DIVISION_SUFFIXES[suffix] else 0.0
@@ -196,6 +210,8 @@ def build_matchup_features(red_snapshot, blue_snapshot, weight_class, feature_co
     for col in feature_columns:
         if col.endswith("_was_missing"):
             indicator_requests.append(col)
+        elif col in static_features:
+            base_features[col] = static_features[col]
         elif col == "stance_mismatch":
             base_features[col] = int(
                 red_snapshot["stance"] in orthodox_southpaw

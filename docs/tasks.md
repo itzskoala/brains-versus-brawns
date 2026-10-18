@@ -212,7 +212,18 @@ multi-output model instead of per-target classifiers - rejected as a bigger arch
 than this dataset size or the existing per-model-file convention calls for.
 
 Status:
-Pending
+Accepted - implemented 2026-10-18 (user explicitly asked to cover all three model families, not
+just logistic_regression as originally recommended above). `src/evaluation/multiclass_backtest.py`
+generalizes the walk-forward backtest + final-fit to any multiclass target, reused by all three
+model families instead of tripling `run_backtest`. Hyperparameters were reused from each model's
+existing winner-target artifact rather than running a new nested search (a deliberate scope cut,
+not an oversight - `nested_validation.py` was NOT parameterized by `target_column` in this pass;
+still a legitimate follow-up if a future pass wants tuned round/method hyperparameters). All 6
+artifacts (`models/<name>_round.json`, `models/<name>_method.json`) beat their majority-class
+baseline on a clear majority of folds - see `docs/results.md`. Wired into `api/main.py`'s
+past-meetings `predicted` block (`predicted_round`/`predicted_method`, alongside the existing
+winner probability) and rendered by `frontend/gradio.py`'s already-built "Unavailable" fallback,
+which needed no changes - it already rendered a real value when one is finally provided.
 
 ---
 

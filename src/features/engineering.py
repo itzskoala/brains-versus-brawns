@@ -506,6 +506,49 @@ def is_predictable_outcome(df):
     )
 
 
+# The round/win-method prediction targets (docs/tasks.md "New prediction
+# targets" Recommendation). Both are static, fight-level facts (like
+# add_matchup_features) with no leakage risk - they describe THIS fight,
+# never used as a feature anywhere, only ever as a label for a row already
+# filtered through is_predictable_outcome. method_bucket collapses the 11
+# raw method_label categories into the same 4 coarse buckets
+# src.features.snapshot._method_rate_buckets already uses for display
+# (ko_tko/submission/decision/other), so the model's "win method" output
+# matches what the UI already calls a method bucket everywhere else.
+METHOD_BUCKET_MAP = {
+    "ko_tko": "ko_tko",
+    "submission": "submission",
+    "decision_unanimous": "decision",
+    "decision_split": "decision",
+    "decision_majority": "decision",
+    "decision_unspecified": "decision",
+    "tko_doctor_stoppage": "other",
+    "dq": "other",
+    "overturned": "other",
+    "could_not_continue": "other",
+    "other": "other",
+}
+METHOD_BUCKETS = sorted(set(METHOD_BUCKET_MAP.values()))
+
+# "3 Rnd (5-5-5)" -> 3, "5 Rnd (5-5-5-5-5)" -> 5, "1 Rnd + OT (12-3)" -> 1.
+# "No Time Limit"/"Unlimited Rnd (...)" (41 + a handful of old fights) have
+# no fixed round count to extract - left as NaN rather than guessed.
+_ROUNDS_SCHEDULED_RE = r"^(\d+)\s*Rnd"
+
+
+def add_fight_outcome_targets(df):
+    """Add method_bucket and rounds_scheduled - see the module-level note
+    above. rounds_scheduled is a FEATURE (so the round-count target model
+    isn't blind to why some fights can only end at round 5); method_bucket
+    and finish_round (already a plain column, no new one needed) are the
+    TARGETS themselves - neither is ever added to a FEATURE_COLUMNS list.
+    Returns a new DataFrame."""
+    df = df.copy()
+    df["method_bucket"] = df["method_label"].map(METHOD_BUCKET_MAP)
+    df["rounds_scheduled"] = df["time_format"].str.extract(_ROUNDS_SCHEDULED_RE)[0].astype(float)
+    return df
+
+
 def engineer_fold_features(train, test, rounds=None):
     """Build matchup, fighter-history, career-stat, finish-tendency,
     recent-form, stance, and (if rounds is given) early-pace features for
@@ -531,6 +574,7 @@ def engineer_fold_features(train, test, rounds=None):
     )
 
     fold = add_matchup_features(fold)
+    fold = add_fight_outcome_targets(fold)
     fold = add_fighter_history_features(fold)
     fold = add_career_stat_features(fold)
     fold = add_finish_tendency_features(fold)

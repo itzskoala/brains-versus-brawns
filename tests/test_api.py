@@ -230,14 +230,45 @@ def test_past_meeting_retains_predicted_winner_for_a_real_no_contest(client):
     assert 0.0 <= predicted["red_win_probability"] <= 1.0
     assert predicted["red_win_probability"] + predicted["blue_win_probability"] == pytest.approx(1.0)
 
-    # No round/win-method model is trained yet (docs/tasks.md
-    # Recommendation) - these must be present but null, never a guessed
-    # value, so the frontend can render "Unavailable" rather than omit the
-    # fields entirely or silently invent a round/method.
+    # Round/win-method targets are now trained (docs/tasks.md
+    # Recommendation, accepted) - the model's pre-fight round/method call
+    # is retained exactly like the winner call, even though the real
+    # outcome here is a no-contest with no official method/round to
+    # compare it against.
     assert "predicted_round" in predicted
     assert "predicted_method" in predicted
-    assert predicted["predicted_round"] is None
-    assert predicted["predicted_method"] is None
+    assert isinstance(predicted["predicted_round"], int)
+    assert predicted["predicted_method"] in ("KO/TKO", "Submission", "Decision", "Other")
+
+
+@pytest.mark.parametrize("model_name", ["logistic_regression", "random_forest", "xgboost_model"])
+def test_past_meeting_predicted_round_and_method_appear_alongside_winner_probability(client, model_name):
+    # Trace through the full pipeline for an ordinary decisive past meeting
+    # (UFC 182, a normal win, not a non-standard outcome): every one of the
+    # three model families must return a real round/method prediction
+    # alongside the existing winner probability, for every corner.
+    jones = _fighter_id(client, "Light Heavyweight", "Jon Jones")
+    cormier = _fighter_id(client, "Light Heavyweight", "Daniel Cormier")
+
+    resp = client.post("/predict", json={
+        "model_name": model_name,
+        "division": "Light Heavyweight",
+        "red_fighter_id": jones,
+        "red_year": None,
+        "blue_fighter_id": cormier,
+        "blue_year": None,
+    })
+    assert resp.status_code == 200
+    meetings = {m["event_name"]: m for m in resp.json()["past_meetings"]}
+    ufc_182 = meetings["UFC 182: Jones vs Cormier"]
+    predicted = ufc_182["predicted"]
+
+    assert predicted is not None
+    assert predicted["predicted_winner"] in ("red", "blue")
+    assert 0.0 <= predicted["red_win_probability"] <= 1.0
+    assert isinstance(predicted["predicted_round"], int)
+    assert 1 <= predicted["predicted_round"] <= 5
+    assert predicted["predicted_method"] in ("KO/TKO", "Submission", "Decision", "Other")
 
 
 def test_predict_record_breaks_out_wins_losses_draws_and_no_contests_separately(client):

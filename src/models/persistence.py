@@ -45,7 +45,7 @@ def fit_final_model(fights, build_model, params, feature_columns, scale):
 
 
 def save_model_artifact(model, scaler, imputer, feature_columns, fitted_feature_columns,
-                         params, metrics, model_name, out_dir="models"):
+                         params, metrics, model_name, out_dir="models", extra_metadata=None):
     """Persist a fitted model (plus its scaler and imputer, if any) to
     out_dir/model_name.joblib, with a sidecar out_dir/model_name.json
     recording the feature set, hyperparameters, and evaluation metrics it
@@ -55,7 +55,13 @@ def save_model_artifact(model, scaler, imputer, feature_columns, fitted_feature_
     feature_columns is the base set snapshot.build_matchup_features needs
     to construct from two fighter snapshots; fitted_feature_columns is that
     plus the imputer's missingness indicators, in the exact column order
-    the model expects - serving needs both."""
+    the model expects - serving needs both.
+
+    extra_metadata (optional dict) is merged into the saved JSON as-is -
+    e.g. src.evaluation.multiclass_backtest uses {"classes": [...]} so a
+    multiclass artifact's integer predictions can be decoded back to their
+    real labels, in the exact column order predict_proba used. None of the
+    fixed keys above may be overridden this way - see the assertion below."""
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
@@ -69,6 +75,9 @@ def save_model_artifact(model, scaler, imputer, feature_columns, fitted_feature_
         "metrics": metrics,
         "saved_at": datetime.now(timezone.utc).isoformat(),
     }
+    if extra_metadata:
+        assert not (set(extra_metadata) & set(metadata)), "extra_metadata cannot override a fixed metadata key"
+        metadata.update(extra_metadata)
     with open(out_dir / f"{model_name}.json", "w") as f:
         json.dump(metadata, f, indent=2)
 
