@@ -4,8 +4,13 @@ on:
   schedule:
     # Sun/Mon mornings UTC - covers the usual Sat/Sun fight-night cycle.
     # Safe to run on a quiet week: the pipeline is a no-op (exit 0, no
-    # commit) whenever ufc.com/events has nothing new.
-    - cron: "0 12 * * 0,1"
+    # commit) whenever ufc.com/events has nothing new. Minute offset by 17
+    # (not :00) per GitHub's own guidance - the top of every hour is their
+    # highest-load, highest-delay slot for scheduled workflows, since it's
+    # the most popular minute for everyone else's cron jobs too; this
+    # workflow's run (verified via the Actions API) never actually fired
+    # at :00 despite being due, which is exactly that failure mode.
+    - cron: "17 12 * * 0,1"
   workflow_dispatch: {}
 
 permissions:
