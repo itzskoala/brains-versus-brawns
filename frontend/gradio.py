@@ -70,29 +70,40 @@ def _get(path, **params):
 
 
 def _fighter_dropdown_label(f):
-    """The picker's own label: fight-title format ('First "Nick" Last'),
-    with the API's disambiguator suffix (from display_name) carried over
-    unchanged for duplicate names - "(b. ...)" when a DOB is on record,
-    plus a short "[id:...]" fighter_id suffix on top of that for the rarer
-    case where even name+DOB isn't enough to tell two real fighters apart
-    (see api/main.py's _build_fighter_index: two distinct fighter_ids can
-    share both a name and a missing DOB, e.g. two real "Anthony Figueroa"
+    """The picker's own label: full name with the nickname appended in
+    quotes ('First Last "Nick"' - NOT the fight-title 'First "Nick" Last'
+    order used elsewhere, e.g. in predict()'s headline), plus the API's
+    disambiguator suffix (from display_name) carried over unchanged for
+    duplicate names - "(b. ...)" when a DOB is on record, plus a short
+    "[id:...]" fighter_id suffix on top of that for the rarer case where
+    even name+DOB isn't enough to tell two real fighters apart (see
+    api/main.py's _build_fighter_index: two distinct fighter_ids can share
+    both a name and a missing DOB, e.g. two real "Anthony Figueroa"
     records - without ANY disambiguator they'd be two visually-identical
     dropdown entries with no way to tell which is which before picking).
     Whatever api/main.py appends after fighter_name is taken verbatim here,
     rather than re-deriving it, so this never drifts out of sync with the
-    API's own disambiguation logic. Deliberately NOT the raw display_name
-    - embedding the nickname here is what makes Gradio's own built-in,
-    instant, client-side Dropdown filter match nicknames too (confirmed: a
-    query like "Sugar" now matches a fighter labeled 'Sean "Suga" O\\'Malley
-    (b. ...)' since "suga" is itself a substring of "sugar" - see
-    _fighter_matches_query for the exact rule this mirrors). No server
-    round-trip per keystroke needed for that - a per-keystroke custom
-    filter (an earlier version of this file used Dropdown.key_up) raced
-    against Gradio's own client-side filter and made selecting a fighter
-    feel laggy/inconsistent; this removes that race entirely by not
+    API's own disambiguation logic.
+
+    Deliberately NOT the fight-title order: embedding the nickname here is
+    what makes Gradio's own built-in, instant, client-side Dropdown filter
+    match nicknames too (confirmed: a query like "Sugar" matches a fighter
+    labeled 'Sean O\\'Malley "Suga" (b. ...)' since "suga" is itself a
+    substring of "sugar" - see _fighter_matches_query for the exact rule
+    this mirrors) - but that same client-side filter only matches a
+    full-name query ("Jon Jones") if "First Last" stays one contiguous
+    substring of the label. Putting the nickname in the middle ('Jon
+    "Bones" Jones') breaks that contiguity; appending it after the full
+    name instead ('Jon Jones "Bones"') keeps both a full-name search and a
+    nickname search working through the same plain substring filter, with
+    no server round-trip per keystroke needed for either - a per-keystroke
+    custom filter (an earlier version of this file used Dropdown.key_up)
+    raced against Gradio's own client-side filter and made selecting a
+    fighter feel laggy/inconsistent; this removes that race entirely by not
     needing a second filter at all."""
-    name = _format_fighter_name(f.get("fighter_name") or f.get("fighter_id", ""), f.get("nick_name"))
+    full_name = f.get("fighter_name") or f.get("fighter_id", "")
+    nickname = (f.get("nick_name") or "").strip()
+    name = f'{full_name} "{nickname}"' if nickname else full_name
     raw_name = f.get("fighter_name") or ""
     display_name = f.get("display_name") or ""
     suffix = display_name[len(raw_name):].strip() if display_name.startswith(raw_name) else ""
@@ -154,20 +165,24 @@ _format_fighter_name = images.format_fighter_name
 
 
 def _fighter_matches_query(full_name, nickname, query):
-    """The matching rule fighter search is built around: first name, last
-    name, or nickname, case-insensitive substring, either direction (e.g.
-    query "Sugar" matches a fighter whose on-record nickname is "Suga",
-    since "suga" is itself a substring of "sugar"). Empty query matches
-    everything. _fighter_dropdown_label's embedded nickname is what makes
-    Gradio's own built-in Dropdown filter actually enforce this rule live,
-    with no server round-trip; this function (and _filter_fighters below)
-    stay as the tested, explicit statement of that rule, and are what a
-    future server-side search (e.g. an API ?search= param) would reuse."""
+    """The matching rule fighter search is built around: a case-insensitive
+    substring match against the fighter's full name (so "Jon Jones" matches
+    even though first-name-only or last-name-only substrings alone would
+    miss it), or against their nickname, either direction (e.g. query
+    "Sugar" matches a fighter whose on-record nickname is "Suga", since
+    "suga" is itself a substring of "sugar"). Empty query matches
+    everything. _fighter_dropdown_label's embedded "First Last "Nickname""
+    text is what makes Gradio's own built-in Dropdown filter actually
+    enforce this rule live, with no server round-trip - a full-name query
+    has to stay a contiguous substring of that label, which is why the
+    nickname sits after the full name there rather than between first and
+    last. This function (and _filter_fighters below) stay as the tested,
+    explicit statement of that rule, and are what a future server-side
+    search (e.g. an API ?search= param) would reuse."""
     query = (query or "").strip().lower()
     if not query:
         return True
-    first, last = _split_name(full_name)
-    if query in first.lower() or query in last.lower():
+    if query in (full_name or "").strip().lower():
         return True
     nickname = (nickname or "").strip().lower()
     return bool(nickname) and (query in nickname or nickname in query)
@@ -243,12 +258,22 @@ def on_fighter_photo_change(fighter_id, fighters, other_corner_selected):
     fighters are picked, so clicking Predict and the photo fetch run
     concurrently rather than Predict waiting on the network call. A
     generator: Gradio streams each yield as its own UI update, so the
-    loading state is genuinely shown while the photo fetch is in flight."""
-    if not fighter_id:
+    loading state is genuinely shown while the photo fetch is in flight.
+
+    fighter_id isn't necessarily a real fighter: the Fighter dropdown
+    allows a custom value (see the allow_custom_value comment above
+    model_dropdown), so this fires for any text a user types, including
+    gibberish that matches no choice at all. info being {} below (no match
+    in `fighters`) is exactly that case - treated the same as "no fighter
+    selected" (placeholder, not selected) rather than fetching/caching a
+    photo under a made-up name, which is what images.get_fighter_image_url
+    would otherwise do with fighter_id itself as the cache key. See
+    on_fighter_change for the same guard applied to the year dropdown."""
+    info = next((f for f in fighters if f["fighter_id"] == fighter_id), None) if fighter_id else None
+    if info is None:
         yield images.fighter_placeholder_html(), False, gr.update(interactive=False)
         return
 
-    info = next((f for f in fighters if f["fighter_id"] == fighter_id), {})
     name = info.get("fighter_name", fighter_id)
     nickname = info.get("nick_name")
     predict_interactive = gr.update(interactive=bool(other_corner_selected))
@@ -299,8 +324,16 @@ def _format_tale_of_the_tape(red_name, red_stats, blue_name, blue_stats, unit="l
         return "-" if x is None else f"{x:.{digits}f}"
 
     def record(stats):
+        # W-L-D-NC: losses/draws/no-contests are their own real counts from
+        # the API now (src/features/engineering.py's add_fighter_history_
+        # features), not "everything that wasn't a win" - a draw or
+        # no-contest is neither. prior_win_rate excludes draws/NCs from its
+        # own denominator (see that function's docstring), so it's still
+        # the right number to show here even though it's no longer simply
+        # wins/prior_fights.
         r = stats["record"]
-        return f"{r['prior_wins']}-{r['prior_fights'] - r['prior_wins']} ({pct(r['prior_win_rate'])})"
+        return (f"{int(r['prior_wins'])}-{int(r['prior_losses'])}-{int(r['prior_draws'])}-"
+                f"{int(r['prior_no_contests'])} ({pct(r['prior_win_rate'])})")
 
     def streak(stats):
         r = stats["record"]
@@ -310,7 +343,7 @@ def _format_tale_of_the_tape(red_name, red_stats, blue_name, blue_stats, unit="l
         return pct(stats["fight_pace"]["method_of_victory"]["wins_by_method"][key])
 
     rows = [
-        ("UFC Record", record(red_stats), record(blue_stats)),
+        ("UFC Record (W-L-D-NC)", record(red_stats), record(blue_stats)),
         ("Current Streak", streak(red_stats), streak(blue_stats)),
         ("Age", num(red_stats["physical"]["age"], 1), num(blue_stats["physical"]["age"], 1)),
         ("Height", _format_height(red_stats["physical"]["height_inches"], unit),
@@ -346,10 +379,18 @@ def _format_tale_of_the_tape(red_name, red_stats, blue_name, blue_stats, unit="l
     return "\n".join(lines) + _low_sample_caveat(red_name, red_stats, blue_name, blue_stats)
 
 
+# actual["winner"] from the API is 4-way (see api/main.py's
+# _meeting_winner) - "draw"/"no_contest" have no red/blue winner, unlike
+# the model's own prediction, which is always red-or-blue (it doesn't
+# predict draws/no-contests at all - see the prediction_line branch below).
+_OUTCOME_LABELS = {"red": "Red", "blue": "Blue", "draw": "Draw", "no_contest": "No Contest"}
+
+
 def _format_meeting(meeting):
     predicted = meeting["predicted"]
     actual = meeting["actual"]
-    winner_label = "Red" if actual["winner"] == "red" else "Blue"
+    winner_label = _OUTCOME_LABELS[actual["winner"]]
+    decisive = actual["winner"] in ("red", "blue")
 
     if predicted is None:
         prediction_line = (
@@ -358,17 +399,24 @@ def _format_meeting(meeting):
         )
     else:
         predicted_label = "Red" if predicted["predicted_winner"] == "red" else "Blue"
-        agree = "✅ model agreed" if predicted["predicted_winner"] == actual["winner"] else "❌ model disagreed"
+        if decisive:
+            agree = "✅ model agreed" if predicted["predicted_winner"] == actual["winner"] else "❌ model disagreed"
+        else:
+            agree = "model predicts a red/blue winner only - it doesn't predict draws/no-contests"
         prediction_line = (
             f"Predicted (as of right before this fight): **{predicted_label}** to win "
             f"({predicted['red_win_probability'] * 100:.1f}% red / "
             f"{predicted['blue_win_probability'] * 100:.1f}% blue) - {agree}\n\n"
         )
 
+    outcome_phrase = (f"**{winner_label}** won by {actual['method']}" if decisive
+                       else f"**{winner_label}** ({actual['method']})")
+    details_note = f" - {actual['details']}" if actual.get("details") else ""
+
     return (
         f"### {meeting['event_name']} ({meeting['event_date']})\n"
         f"{prediction_line}"
-        f"Actual: **{winner_label}** won by {actual['method']} (round {actual['finish_round']})\n\n"
+        f"Actual: {outcome_phrase} (round {actual['finish_round']}){details_note}\n\n"
         f"Actual fight stats - Red: {actual['red']['sig_str_landed']} sig. str landed, "
         f"{actual['red']['td_success']} TD | Blue: {actual['blue']['sig_str_landed']} sig. str landed, "
         f"{actual['blue']['td_success']} TD"
@@ -442,7 +490,23 @@ def predict(model_name, division, red_fighter_id, red_year, blue_fighter_id, blu
     return headline, tale_of_the_tape, history, last_result
 
 
-with gr.Blocks(title="UFC Matchup Predictor") as demo:
+# Tale of the Tape is rendered as a 3-column Markdown table (red value |
+# label | blue value - see _format_tale_of_the_tape). Left unstyled, a
+# plain GFM table auto-sizes each column to its own longest cell, so
+# whichever corner happens to have longer text (a longer stance name, a
+# 3-digit percentage) gets a visibly wider column than the other corner -
+# not an actual data difference, just column auto-sizing. table-layout:
+# fixed plus an explicit, equal percentage width on the two outer (red/
+# blue) columns keeps both fighter columns the same width regardless of
+# content length; the label column gets what's left over.
+TALE_OF_THE_TAPE_CSS = """
+#tale-of-the-tape table { table-layout: fixed; width: 100%; }
+#tale-of-the-tape th:first-child, #tale-of-the-tape td:first-child,
+#tale-of-the-tape th:last-child, #tale-of-the-tape td:last-child { width: 37%; }
+#tale-of-the-tape th:nth-child(2), #tale-of-the-tape td:nth-child(2) { width: 26%; }
+"""
+
+with gr.Blocks(title="UFC Matchup Predictor", css=TALE_OF_THE_TAPE_CSS) as demo:
     unit_state = gr.State("lbs")
     divisions_state = gr.State([])  # raw division names, for relabeling on unit toggle
     fighters_state = gr.State([])  # raw fighter dicts for the current division, for search
@@ -503,7 +567,7 @@ with gr.Blocks(title="UFC Matchup Predictor") as demo:
         with gr.Column(scale=1, min_width=160):
             red_photo = gr.HTML(images.fighter_placeholder_html())
         with gr.Column(scale=3):
-            tale_of_the_tape_panel = gr.Markdown(label="Tale of the Tape")
+            tale_of_the_tape_panel = gr.Markdown(label="Tale of the Tape", elem_id="tale-of-the-tape")
         with gr.Column(scale=1, min_width=160):
             blue_photo = gr.HTML(images.fighter_placeholder_html())
     rematch_history = gr.Markdown(label="Past Meetings")

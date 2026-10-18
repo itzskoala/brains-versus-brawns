@@ -82,7 +82,10 @@ def test_format_fighter_name_single_word_name_with_nickname():
 
 def test_fighter_dropdown_label_no_disambiguator_is_plain_name():
     f = {"fighter_id": "x", "fighter_name": "Jon Jones", "nick_name": "Bones", "display_name": "Jon Jones"}
-    assert fg._fighter_dropdown_label(f) == 'Jon "Bones" Jones'
+    # Nickname appended after the full name (not inserted between first and
+    # last) so "Jon Jones" stays a contiguous, searchable substring of the
+    # label - see _fighter_dropdown_label's docstring.
+    assert fg._fighter_dropdown_label(f) == 'Jon Jones "Bones"'
 
 
 def test_fighter_dropdown_label_carries_over_dob_suffix():
@@ -107,7 +110,7 @@ def test_fighter_dropdown_label_carries_over_fighter_id_suffix():
 def test_fighter_dropdown_label_carries_over_combined_dob_and_id_suffix():
     f = {"fighter_id": "x", "fighter_name": "Same Name", "nick_name": "Nick",
          "display_name": "Same Name (b. 1990-01-01) [id:abcd1234]"}
-    assert fg._fighter_dropdown_label(f) == 'Same "Nick" Name (b. 1990-01-01) [id:abcd1234]'
+    assert fg._fighter_dropdown_label(f) == 'Same Name "Nick" (b. 1990-01-01) [id:abcd1234]'
 
 
 # Real data: data/fighter.csv has Sean O'Malley and Rashad Evans both with
@@ -132,6 +135,22 @@ def test_search_matches_first_name():
 
 def test_search_matches_last_name():
     assert fg._fighter_matches_query("Jon Jones", None, "jones") is True
+
+
+def test_search_matches_full_name_without_needing_the_nickname():
+    # The reported bug: searching the fighter's real full name should work
+    # without typing their nickname in between (e.g. "Jon Bones Jones").
+    assert fg._fighter_matches_query("Jon Jones", "Bones", "Jon Jones") is True
+    assert fg._fighter_matches_query("Jon Jones", "Bones", "jon jones") is True
+
+
+def test_search_full_name_matches_in_the_actual_dropdown_label_too():
+    # Guards the pairing between _fighter_matches_query and
+    # _fighter_dropdown_label: Gradio's own live filter matches against the
+    # rendered label text, so "Jon Jones" must be a literal substring of it
+    # even though the fighter has a nickname.
+    f = {"fighter_id": "x", "fighter_name": "Jon Jones", "nick_name": "Bones", "display_name": "Jon Jones"}
+    assert "jon jones" in fg._fighter_dropdown_label(f).lower()
 
 
 def test_search_with_missing_nickname_does_not_crash_and_does_not_match_unrelated_query():
@@ -162,9 +181,11 @@ def test_filter_fighters_empty_query_returns_all():
     assert fg._filter_fighters(fighters, "") == fighters
 
 
-def _make_stats(prior_fights, prior_wins=0):
+def _make_stats(prior_fights, prior_wins=0, prior_draws=0, prior_no_contests=0):
     # minimal build_display_stats-shaped dict - only the fields
     # _format_tale_of_the_tape/_low_sample_caveat actually read.
+    prior_losses = prior_fights - prior_wins - prior_draws - prior_no_contests
+    decided = prior_wins + prior_losses
     return {
         "striking": {"slpm": 1.0, "striking_accuracy": 0.5, "sapm": 1.0, "striking_defense": 0.5},
         "grappling": {"takedown_avg_per_15min": 0.0, "takedown_accuracy": None,
@@ -175,7 +196,9 @@ def _make_stats(prior_fights, prior_wins=0):
             "occurrence": {"ko_tko": 0.0, "submission": 0.0, "decision": 0.0, "other": 0.0},
             "wins_by_method": {"ko_tko": 0.0, "submission": 0.0, "decision": 0.0, "other": 0.0}}},
         "record": {"prior_fights": prior_fights, "prior_wins": prior_wins,
-                   "prior_win_rate": (prior_wins / prior_fights) if prior_fights else None,
+                   "prior_losses": prior_losses, "prior_draws": prior_draws,
+                   "prior_no_contests": prior_no_contests,
+                   "prior_win_rate": (prior_wins / decided) if decided else None,
                    "win_streak": 0, "loss_streak": 0, "form_last5_win_rate": None},
     }
 
@@ -214,6 +237,17 @@ def test_format_tale_of_the_tape_no_caveat_when_both_corners_established():
     blue = _make_stats(prior_fights=20, prior_wins=15)
     tape = fg._format_tale_of_the_tape("Red Fighter", red, "Blue Fighter", blue)
     assert "⚠️" not in tape
+
+
+def test_tale_of_the_tape_record_shows_w_l_d_nc_with_draws_and_no_contests_separate():
+    # 10 fights: 6 wins, 1 draw, 1 no-contest -> 2 losses (10 - 6 - 1 - 1).
+    # win_rate excludes the draw/NC from its denominator: 6 / (6 + 2) = 75%.
+    red = _make_stats(prior_fights=10, prior_wins=6, prior_draws=1, prior_no_contests=1)
+    blue = _make_stats(prior_fights=5, prior_wins=5)
+    tape = fg._format_tale_of_the_tape("Red Fighter", red, "Blue Fighter", blue)
+    assert "UFC Record (W-L-D-NC)" in tape
+    assert "6-2-1-1 (75.0%)" in tape
+    assert "5-0-0-0 (100.0%)" in tape
 
 
 class _FakeResponse:
@@ -292,6 +326,33 @@ def test_get_returns_json_on_success(monkeypatch):
 # above model_dropdown/division_dropdown/red_fighter/blue_fighter.
 # ---------------------------------------------------------------------------
 
+# ---------------------------------------------------------------------------
+# Issue 2: Tale of the Tape's two fighter columns (red/blue values either
+# side of the label column) must render at equal width, not whatever width
+# each column's own longest cell happens to need.
+# ---------------------------------------------------------------------------
+
+def test_tale_of_the_tape_panel_has_the_elem_id_the_width_css_targets():
+    assert fg.tale_of_the_tape_panel.elem_id == "tale-of-the-tape"
+
+
+def test_tale_of_the_tape_css_forces_equal_width_fighter_columns():
+    css = fg.TALE_OF_THE_TAPE_CSS
+    assert "#tale-of-the-tape" in css
+    assert "table-layout: fixed" in css
+    # first-child (red value column) and last-child (blue value column)
+    # must be declared together in one rule, so they always share the
+    # exact same width - not two separately-tunable widths that could
+    # drift apart.
+    import re
+    rule = re.search(r"first-child.*?last-child[^{]*\{\s*width:\s*([\d.]+%)\s*;?\s*\}", css, re.S)
+    assert rule is not None
+    # And that shared width must differ from the (narrower) label column's
+    # own width, confirming this rule is actually doing something.
+    label_rule = re.search(r"nth-child\(2\)[^{]*\{\s*width:\s*([\d.]+%)", css)
+    assert label_rule is not None and label_rule.group(1) != rule.group(1)
+
+
 def test_dynamic_dropdowns_allow_custom_value_so_gradio_never_hard_raises():
     assert fg.model_dropdown.allow_custom_value is True
     assert fg.division_dropdown.allow_custom_value is True
@@ -320,6 +381,45 @@ def test_on_fighter_change_valid_selection_still_populates_years(monkeypatch):
     monkeypatch.setattr(fg, "_fighter_choices", lambda division: ([], _FIGHTERS))
     year_update, other_fighter_update, other_year_update = fg.on_fighter_change("Lightweight", "r1", None)
     assert year_update["choices"] == [fg.NO_YEAR_CHOICE, "2020", "2021"]
+
+
+def test_on_fighter_photo_change_valid_fighter_fetches_and_shows_photo(monkeypatch):
+    monkeypatch.setattr(fg.images, "get_fighter_image_url", lambda fid, name: "https://ufc.com/x.png")
+    results = list(fg.on_fighter_photo_change("r1", _FIGHTERS, False))
+    _html, selected, _predict_update = results[-1]
+    assert selected is True
+    assert "<img" in _html
+
+
+def test_on_fighter_photo_change_blank_fighter_id_shows_placeholder_without_fetch(monkeypatch):
+    def _boom(*a, **k):
+        raise AssertionError("must not fetch a photo when no fighter is selected")
+    monkeypatch.setattr(fg.images, "get_fighter_image_url", _boom)
+
+    results = list(fg.on_fighter_photo_change(None, _FIGHTERS, False))
+    assert len(results) == 1
+    html, selected, predict_update = results[0]
+    assert selected is False
+    assert predict_update["interactive"] is False
+    assert "Select a fighter" in html
+
+
+def test_on_fighter_photo_change_invalid_custom_value_never_fetches_or_caches_a_photo(monkeypatch):
+    # Issue 3: the Fighter dropdown allows a custom typed value (see the
+    # allow_custom_value comment), so this can fire with a fighter_id that
+    # matches nothing in `fighters` - e.g. a random/invalid search string.
+    # That must be treated like "no fighter selected", never as a real
+    # fighter whose (fabricated) name gets looked up and potentially cached.
+    def _boom(*a, **k):
+        raise AssertionError("must not fetch/cache an image for an invalid selection")
+    monkeypatch.setattr(fg.images, "get_fighter_image_url", _boom)
+
+    results = list(fg.on_fighter_photo_change("some random gibberish", _FIGHTERS, False))
+    assert len(results) == 1
+    html, selected, predict_update = results[0]
+    assert selected is False
+    assert predict_update["interactive"] is False
+    assert "Select a fighter" in html
 
 
 def test_on_fighter_change_blank_fighter_id_short_circuits_without_a_lookup(monkeypatch):
