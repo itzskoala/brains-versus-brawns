@@ -187,16 +187,21 @@ class PredictRequest(BaseModel):
         return value
 
 
-def _predict(model_name, division, red_fighter_id, red_cutoff, blue_fighter_id, blue_cutoff,
-             fights, fighters_df):
+def _predict(model_name, division, red_snapshot, blue_snapshot):
+    # Takes already-built snapshots rather than fighter_id/cutoff/fights -
+    # build_fighter_snapshot reruns the full engineer_fold_features
+    # pipeline over the whole fights table every call, expensive enough
+    # that building it once per corner and reusing it across every target
+    # (win/round/method) - see predict() below - instead of rebuilding it
+    # inside each of _predict/_predict_multiclass/build_display_stats
+    # separately, is the difference between a fast response and a client
+    # read-timeout on a matchup with several real past meetings.
     model, scaler, imputer, meta = _state["models"][model_name]
     feature_columns = meta["feature_columns"]
     # pre-imputation artifacts have no "fitted_feature_columns" - the model
     # was fit on feature_columns directly, with no missingness indicators.
     fitted_feature_columns = meta.get("fitted_feature_columns", feature_columns)
 
-    red_snapshot = build_fighter_snapshot(fights, fighters_df, red_fighter_id, red_cutoff, division)
-    blue_snapshot = build_fighter_snapshot(fights, fighters_df, blue_fighter_id, blue_cutoff, division)
     feats = build_matchup_features(red_snapshot, blue_snapshot, division, fitted_feature_columns, imputer=imputer)
 
     X = pd.DataFrame([feats])[fitted_feature_columns]
@@ -213,8 +218,7 @@ def _predict(model_name, division, red_fighter_id, red_cutoff, blue_fighter_id, 
 _METHOD_DISPLAY = {"ko_tko": "KO/TKO", "submission": "Submission", "decision": "Decision", "other": "Other"}
 
 
-def _predict_multiclass(artifact_key, division, red_fighter_id, red_cutoff, blue_fighter_id, blue_cutoff,
-                         fights, fighters_df, static_features=None):
+def _predict_multiclass(artifact_key, division, red_snapshot, blue_snapshot, static_features=None):
     """The single most-likely class for a round or win-method artifact
     (meta["classes"], decoded from the model's integer prediction - see
     src.evaluation.multiclass_backtest), or None if artifact_key has no
@@ -224,7 +228,8 @@ def _predict_multiclass(artifact_key, division, red_fighter_id, red_cutoff, blue
     called for anyway). Mirrors _predict's snapshot-based feature
     construction exactly; never substitutes a guess for a missing
     artifact - the caller gets None back and must pass that through
-    as-is, not silently invent a round/method."""
+    as-is, not silently invent a round/method. Takes already-built
+    snapshots - see _predict's own comment on why."""
     artifact = _state["multiclass_models"].get(artifact_key)
     if artifact is None:
         return None
@@ -233,8 +238,6 @@ def _predict_multiclass(artifact_key, division, red_fighter_id, red_cutoff, blue
     fitted_feature_columns = meta.get("fitted_feature_columns", feature_columns)
     classes = meta["classes"]
 
-    red_snapshot = build_fighter_snapshot(fights, fighters_df, red_fighter_id, red_cutoff, division)
-    blue_snapshot = build_fighter_snapshot(fights, fighters_df, blue_fighter_id, blue_cutoff, division)
     feats = build_matchup_features(red_snapshot, blue_snapshot, division, fitted_feature_columns,
                                     imputer=imputer, static_features=static_features)
 
@@ -282,8 +285,13 @@ def predict(req: PredictRequest):
         red_cutoff = latest_fight_date(fights, req.red_fighter_id, req.red_year)
         blue_cutoff = latest_fight_date(fights, req.blue_fighter_id, req.blue_year)
 
-        red_win_probability = _predict(req.model_name, req.division, req.red_fighter_id, red_cutoff,
-                                        req.blue_fighter_id, blue_cutoff, fights, fighters_df)
+        # Built once per corner and reused for every target below (win,
+        # round, method, display stats) instead of each one rebuilding it
+        # from scratch - see _predict's comment on why that matters.
+        red_snapshot = build_fighter_snapshot(fights, fighters_df, req.red_fighter_id, red_cutoff, req.division)
+        blue_snapshot = build_fighter_snapshot(fights, fighters_df, req.blue_fighter_id, blue_cutoff, req.division)
+
+        red_win_probability = _predict(req.model_name, req.division, red_snapshot, blue_snapshot)
 
         # This matchup is hypothetical (no real fight row to read a
         # scheduled round count off of, unlike a past meeting below) - the
@@ -291,17 +299,14 @@ def predict(req: PredictRequest):
         # validated to one of those two values on PredictRequest) decides
         # it, never a guessed/fixed default.
         predicted_round = _predict_multiclass(
-            f"{req.model_name}_round", req.division, req.red_fighter_id, red_cutoff,
-            req.blue_fighter_id, blue_cutoff, fights, fighters_df,
+            f"{req.model_name}_round", req.division, red_snapshot, blue_snapshot,
             static_features={"rounds_scheduled": float(req.rounds_scheduled)})
-        predicted_method = _predict_multiclass(
-            f"{req.model_name}_method", req.division, req.red_fighter_id, red_cutoff,
-            req.blue_fighter_id, blue_cutoff, fights, fighters_df)
+        predicted_method = _predict_multiclass(f"{req.model_name}_method", req.division, red_snapshot, blue_snapshot)
 
         red_display = build_display_stats(fights, fights_with_features, fighters_df,
-                                           req.red_fighter_id, red_cutoff, req.division)
+                                           req.red_fighter_id, red_cutoff, req.division, snapshot=red_snapshot)
         blue_display = build_display_stats(fights, fights_with_features, fighters_df,
-                                            req.blue_fighter_id, blue_cutoff, req.division)
+                                            req.blue_fighter_id, blue_cutoff, req.division, snapshot=blue_snapshot)
     except ValueError as e:
         raise HTTPException(400, str(e))
 
@@ -320,8 +325,15 @@ def predict(req: PredictRequest):
         meeting_date = meeting["event_date"]
 
         try:
-            historical_red_prob = _predict(req.model_name, meeting_division, req.red_fighter_id, meeting_date,
-                                            req.blue_fighter_id, meeting_date, trimmed_fights, fighters_df)
+            # Built once per corner for this meeting and reused for every
+            # target below, same reasoning as the top-level matchup above.
+            red_meeting_snapshot = build_fighter_snapshot(
+                trimmed_fights, fighters_df, req.red_fighter_id, meeting_date, meeting_division)
+            blue_meeting_snapshot = build_fighter_snapshot(
+                trimmed_fights, fighters_df, req.blue_fighter_id, meeting_date, meeting_division)
+
+            historical_red_prob = _predict(req.model_name, meeting_division,
+                                            red_meeting_snapshot, blue_meeting_snapshot)
 
             # rounds_scheduled is a fight-level fact (3 vs. 5 scheduled
             # rounds), not derivable from either fighter's own snapshot -
@@ -335,17 +347,17 @@ def predict(req: PredictRequest):
                 meeting_rounds_scheduled.iloc[0] if not meeting_rounds_scheduled.empty else None)
 
             predicted_round = _predict_multiclass(
-                f"{req.model_name}_round", meeting_division, req.red_fighter_id, meeting_date,
-                req.blue_fighter_id, meeting_date, trimmed_fights, fighters_df,
+                f"{req.model_name}_round", meeting_division, red_meeting_snapshot, blue_meeting_snapshot,
                 static_features={"rounds_scheduled": meeting_rounds_scheduled})
             predicted_method = _predict_multiclass(
-                f"{req.model_name}_method", meeting_division, req.red_fighter_id, meeting_date,
-                req.blue_fighter_id, meeting_date, trimmed_fights, fighters_df)
+                f"{req.model_name}_method", meeting_division, red_meeting_snapshot, blue_meeting_snapshot)
 
             red_pre_fight = build_display_stats(trimmed_fights, trimmed_features, fighters_df,
-                                                 req.red_fighter_id, meeting_date, meeting_division)
+                                                 req.red_fighter_id, meeting_date, meeting_division,
+                                                 snapshot=red_meeting_snapshot)
             blue_pre_fight = build_display_stats(trimmed_fights, trimmed_features, fighters_df,
-                                                  req.blue_fighter_id, meeting_date, meeting_division)
+                                                  req.blue_fighter_id, meeting_date, meeting_division,
+                                                  snapshot=blue_meeting_snapshot)
             predicted = {
                 "red_win_probability": historical_red_prob,
                 "blue_win_probability": 1 - historical_red_prob,

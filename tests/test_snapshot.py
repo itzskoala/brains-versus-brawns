@@ -96,6 +96,46 @@ def test_build_fighter_snapshot_excludes_fights_strictly_after_the_cutoff(fights
     assert snapshot["prior_wins"] == 1
 
 
+# ---------------------------------------------------------------------------
+# Regression: data freshness. api.main.load_state() loads fights/fighters_df
+# ONCE per process (see the lifespan hook) - but every build_fighter_snapshot
+# call must still read whatever is CURRENTLY in that table at call time (not
+# a copy frozen earlier), and must never let a newly-scraped fight leak into
+# a snapshot whose cutoff predates it. Simulates the weekly scrape-and-
+# retrain cron (.github/workflows/update-fight-data.yml) landing one new
+# real result mid-process.
+# ---------------------------------------------------------------------------
+
+def test_build_fighter_snapshot_picks_up_a_fight_added_to_the_table_after_the_fixture_was_built(fighters_df):
+    # X has one fight on record (2010). A fresh DataFrame - standing in for
+    # _state["fights"] after a cron-triggered reload - adds a second, later
+    # one for X. A snapshot as-of-now (after both) must count both; the
+    # exact same table queried as-of a date before the new fight must still
+    # see only the first - proving the function reads the table it's given
+    # at call time, not some cached state from an earlier call.
+    original_fights = pd.DataFrame([make_fight("f1", "2010-01-01", "X", "A", "X")])
+    refreshed_fights = pd.concat([
+        original_fights,
+        pd.DataFrame([make_fight("f2_new", "2024-06-01", "X", "B", "X")]),
+    ], ignore_index=True)
+
+    before_new_fight = build_fighter_snapshot(refreshed_fights, fighters_df, "X", pd.Timestamp("2015-01-01"),
+                                               weight_class="Lightweight")
+    after_new_fight = build_fighter_snapshot(refreshed_fights, fighters_df, "X", pd.Timestamp("2024-06-01"),
+                                              weight_class="Lightweight")
+
+    assert before_new_fight["prior_fights"] == 1  # the new 2024 fight hasn't happened yet as of this cutoff
+    assert after_new_fight["prior_fights"] == 2  # now included - its own event_date is <= the cutoff
+
+    # The same cutoff against the ORIGINAL table (pre-refresh) must be
+    # unaffected by the later call against refreshed_fights above - no
+    # shared mutable state leaking between the two build_fighter_snapshot
+    # calls.
+    still_original = build_fighter_snapshot(original_fights, fighters_df, "X", pd.Timestamp("2024-06-01"),
+                                             weight_class="Lightweight")
+    assert still_original["prior_fights"] == 1
+
+
 def test_build_fighter_snapshot_raises_before_debut(fights, fighters_df):
     with pytest.raises(ValueError):
         build_fighter_snapshot(fights, fighters_df, "X", pd.Timestamp("2000-01-01"),

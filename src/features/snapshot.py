@@ -342,14 +342,26 @@ def _method_rate_buckets(snapshot, prefix):
     }
 
 
-def build_display_stats(fights, fights_with_features, fighters_df, fighter_id, as_of_date, weight_class):
+def build_display_stats(fights, fights_with_features, fighters_df, fighter_id, as_of_date, weight_class,
+                         snapshot=None):
     """The full fighter stats panel: Striking, Grappling/Wrestling,
     Physical/Structural, and Fight Pace & Outcome metrics, all as of
     as_of_date. Combines build_fighter_snapshot (self-side career stats,
     already correctly point-in-time) with build_fighter_opponent_stats and
     strength_of_schedule (the opponent-side stats build_fighter_snapshot
-    doesn't compute)."""
-    snapshot = build_fighter_snapshot(fights, fighters_df, fighter_id, as_of_date, weight_class)
+    doesn't compute).
+
+    snapshot: an already-built build_fighter_snapshot result for this same
+    (fighter_id, as_of_date, weight_class), reused as-is instead of being
+    rebuilt. build_fighter_snapshot reruns the full engineer_fold_features
+    pipeline over the whole fights table every call - expensive enough
+    that api/main.py's /predict rebuilding it from scratch once per target
+    (win/round/method) AND again here was turning into real request
+    latency (see api/main.py's predict() for the one-snapshot-per-corner
+    reuse this parameter exists for). None (the default) builds it here,
+    unchanged from before this parameter existed."""
+    if snapshot is None:
+        snapshot = build_fighter_snapshot(fights, fighters_df, fighter_id, as_of_date, weight_class)
     opponent_stats = build_fighter_opponent_stats(fights, fighter_id, as_of_date)
     schedule = strength_of_schedule(fights_with_features, fighter_id, as_of_date)
 

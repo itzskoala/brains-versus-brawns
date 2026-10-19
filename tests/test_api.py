@@ -426,3 +426,162 @@ def test_predict_rounds_scheduled_actually_feeds_the_round_model_not_just_the_ec
 
     assert _capture_first_round_call(3) == 3.0
     assert _capture_first_round_call(5) == 5.0
+
+
+# ---------------------------------------------------------------------------
+# Data freshness and no-leakage: api.main.load_state() only runs once, at
+# process startup (see the lifespan hook) - _state["fights"] is NOT reloaded
+# per request. The snapshot-reuse refactor in predict() (building one
+# snapshot per corner/cutoff and sharing it across the win/round/method/
+# display-stats targets) must not add any ADDITIONAL caching on top of
+# that: every request still has to (a) read whatever is currently in
+# _state at call time, and (b) build a genuinely distinct snapshot for
+# every distinct (fighter, cutoff) pair it needs - the live matchup's own
+# cutoff, and each past meeting's own, real historical cutoff - never
+# reusing one for another.
+# ---------------------------------------------------------------------------
+
+def test_predict_builds_exactly_one_snapshot_per_fighter_cutoff_with_no_cross_contamination(client, monkeypatch):
+    jones = _fighter_id(client, "Light Heavyweight", "Jon Jones")
+    cormier = _fighter_id(client, "Light Heavyweight", "Daniel Cormier")
+    original = api_main.build_fighter_snapshot
+    calls = []
+
+    def _spy(fights, fighters_df, fighter_id, as_of_date, weight_class):
+        calls.append((fighter_id, as_of_date))
+        return original(fights, fighters_df, fighter_id, as_of_date, weight_class)
+
+    monkeypatch.setattr(api_main, "build_fighter_snapshot", _spy)
+
+    resp = client.post("/predict", json={
+        "model_name": "xgboost_model", "division": "Light Heavyweight",
+        "red_fighter_id": jones, "blue_fighter_id": cormier,
+    })
+    assert resp.status_code == 200
+    data = resp.json()
+    meeting_dates = {pd.Timestamp(m["event_date"]) for m in data["past_meetings"]}
+    assert meeting_dates, "this test needs a real rivalry with at least one past meeting to prove anything"
+
+    red_cutoff = pd.Timestamp(data["red_snapshot_date"])
+    blue_cutoff = pd.Timestamp(data["blue_snapshot_date"])
+    # Jones has fought many times since his UFC 214/182 meetings with
+    # Cormier - if this ever stops being true (dataset cut off earlier),
+    # the coincident-date edge case below needs separate handling rather
+    # than this assertion silently passing on a false premise.
+    assert red_cutoff not in meeting_dates
+
+    jones_calls = [c for c in calls if c[0] == jones]
+    cormier_calls = [c for c in calls if c[0] == cormier]
+
+    # The live matchup's own cutoff is built exactly once per corner (the
+    # win/round/method/display-stats targets all reuse it - see
+    # api.main.predict) - not the 4 separate rebuilds from before the
+    # snapshot-reuse refactor.
+    assert sum(1 for c in jones_calls if c[1] == red_cutoff) == 1
+    assert sum(1 for c in cormier_calls if c[1] == blue_cutoff) == 1
+
+    # Every past meeting gets its own real historical cutoff, also built
+    # exactly once per corner - never reusing the live matchup's cutoff or
+    # another meeting's.
+    for meeting_date in meeting_dates:
+        assert sum(1 for c in jones_calls if c[1] == meeting_date) == 1
+        assert sum(1 for c in cormier_calls if c[1] == meeting_date) == 1
+
+    # No extra/duplicate builds anywhere: exactly one call per corner per
+    # distinct cutoff actually needed (live matchup + one per meeting).
+    assert len(jones_calls) == 1 + len(meeting_dates)
+    assert len(cormier_calls) == 1 + len(meeting_dates)
+
+
+def test_predict_uses_the_current_state_fights_table_not_a_copy_frozen_at_startup(client, monkeypatch):
+    # Regression for the weekly scrape-and-retrain cron
+    # (.github/workflows/update-fight-data.yml): once new data replaces
+    # _state["fights"] (whether via a future live-reload or, today, a
+    # fresh process after that cron's push redeploys the service),
+    # /predict must reflect it on the very next call - not a fights table
+    # captured once by an earlier call or cached anywhere else.
+    jones = _fighter_id(client, "Light Heavyweight", "Jon Jones")
+    cormier = _fighter_id(client, "Light Heavyweight", "Daniel Cormier")
+
+    baseline = client.post("/predict", json={
+        "model_name": "xgboost_model", "division": "Light Heavyweight",
+        "red_fighter_id": jones, "blue_fighter_id": cormier,
+    }).json()
+    baseline_cutoff = baseline["red_snapshot_date"]
+    baseline_prior_fights = baseline["red_stats"]["record"]["prior_fights"]
+
+    original_fights = api_main._state["fights"]
+    new_fight_date = original_fights["event_date"].max() + pd.Timedelta(days=30)
+    # Template off Jones's own most recent real fight row so every column
+    # engineer_fold_features needs is already present and valid - only the
+    # fight-identifying fields are overwritten.
+    template = original_fights[original_fights["r_fighter_id"] == jones].iloc[-1].to_dict()
+    template.update({
+        "fight_id": "__regression_new_fight__",
+        "event_date": new_fight_date,
+        "winner_id": jones,
+        "result_status": "win",
+        "weight_class": "Light Heavyweight",
+        "b_fighter_id": "__regression_new_opponent__",
+    })
+    refreshed_fights = pd.concat([original_fights, pd.DataFrame([template])], ignore_index=True)
+    monkeypatch.setitem(api_main._state, "fights", refreshed_fights)
+
+    resp = client.post("/predict", json={
+        "model_name": "xgboost_model", "division": "Light Heavyweight",
+        "red_fighter_id": jones, "blue_fighter_id": cormier,
+    })
+    assert resp.status_code == 200
+    data = resp.json()
+
+    # Picked up immediately, no restart/reload step beyond the dict
+    # assignment above - proving nothing holds a stale copy of the fights
+    # table across requests.
+    assert data["red_snapshot_date"] == new_fight_date.date().isoformat()
+    assert data["red_snapshot_date"] != baseline_cutoff
+    assert data["red_stats"]["record"]["prior_fights"] == baseline_prior_fights + 1
+
+    # The real past meetings against Cormier (unaffected by this synthetic
+    # fight, which is against a different, fake opponent) must still be
+    # exactly the same ones as before - the new row must not shadow or
+    # duplicate any real historical data.
+    assert {m["fight_id"] for m in data["past_meetings"]} == {m["fight_id"] for m in baseline["past_meetings"]}
+
+
+def test_predict_excludes_a_fight_the_requested_year_cutoff_precedes(client, monkeypatch):
+    # The flip side of the freshness test above: a newly-added fight must
+    # NOT leak into a snapshot whose requested cutoff is strictly before
+    # it - no look-ahead, even once the fight exists somewhere in the
+    # table.
+    jones = _fighter_id(client, "Light Heavyweight", "Jon Jones")
+    cormier = _fighter_id(client, "Light Heavyweight", "Daniel Cormier")
+
+    original_fights = api_main._state["fights"]
+    jones_fights = original_fights[original_fights["r_fighter_id"] == jones]
+    pre_cutoff_year = int(jones_fights["event_date"].max().year)
+    # Forced into the NEXT calendar year outright (not "+30 days", which
+    # could land in the same year as pre_cutoff_year and get picked up by
+    # red_year=pre_cutoff_year itself, defeating the point of this test).
+    new_fight_date = pd.Timestamp(f"{pre_cutoff_year + 1}-01-15")
+
+    template = jones_fights.iloc[-1].to_dict()
+    template.update({
+        "fight_id": "__regression_future_fight__",
+        "event_date": new_fight_date,
+        "winner_id": jones,
+        "result_status": "win",
+        "weight_class": "Light Heavyweight",
+        "b_fighter_id": "__regression_future_opponent__",
+    })
+    refreshed_fights = pd.concat([original_fights, pd.DataFrame([template])], ignore_index=True)
+    monkeypatch.setitem(api_main._state, "fights", refreshed_fights)
+
+    resp = client.post("/predict", json={
+        "model_name": "xgboost_model", "division": "Light Heavyweight",
+        "red_fighter_id": jones, "red_year": pre_cutoff_year,
+        "blue_fighter_id": cormier,
+    })
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["red_snapshot_date"] != new_fight_date.date().isoformat()
+    assert pd.Timestamp(data["red_snapshot_date"]).year == pre_cutoff_year
