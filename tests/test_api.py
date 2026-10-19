@@ -2,6 +2,7 @@ import pandas as pd
 import pytest
 from fastapi.testclient import TestClient
 
+import api.main as api_main
 from api.main import _build_fighter_index, app
 
 
@@ -179,6 +180,14 @@ def test_predict_happy_path_with_per_fighter_years(client):
     assert "striking" in data["red_stats"]
     assert "grappling" in data["blue_stats"]
 
+    # Round/win-method targets (docs/tasks.md Recommendation) must be
+    # predicted for this upcoming/hypothetical matchup too, not just for
+    # past meetings - see test_past_meeting_predicted_round_and_method_
+    # appear_alongside_winner_probability below.
+    assert isinstance(data["predicted_round"], int)
+    assert 1 <= data["predicted_round"] <= 5
+    assert data["predicted_method"] in ("KO/TKO", "Submission", "Decision", "Other")
+
     # a real past meeting (UFC 182) should show up with its own
     # predicted-vs-actual comparison.
     assert len(data["past_meetings"]) >= 1
@@ -337,3 +346,83 @@ def test_predict_rejects_year_before_fighter_debut(client):
         "blue_fighter_id": cormier,
     })
     assert resp.status_code == 400
+
+
+# ---------------------------------------------------------------------------
+# Fight format (3 vs. 5 scheduled rounds) - the frontend's toggle. This is a
+# real model input (rounds_scheduled, see src.features.engineering.
+# add_fight_outcome_targets), not just a display label, so these tests
+# confirm the selection actually changes what's fed into the round model,
+# not merely what the response happens to echo back.
+# ---------------------------------------------------------------------------
+
+def test_predict_defaults_rounds_scheduled_to_3_when_omitted(client):
+    jones = _fighter_id(client, "Light Heavyweight", "Jon Jones")
+    cormier = _fighter_id(client, "Light Heavyweight", "Daniel Cormier")
+
+    resp = client.post("/predict", json={
+        "model_name": "xgboost_model", "division": "Light Heavyweight",
+        "red_fighter_id": jones, "blue_fighter_id": cormier,
+    })
+    assert resp.status_code == 200
+    assert resp.json()["rounds_scheduled"] == 3
+
+
+@pytest.mark.parametrize("rounds_scheduled", [3, 5])
+def test_predict_rounds_scheduled_round_trips_in_response(client, rounds_scheduled):
+    jones = _fighter_id(client, "Light Heavyweight", "Jon Jones")
+    cormier = _fighter_id(client, "Light Heavyweight", "Daniel Cormier")
+
+    resp = client.post("/predict", json={
+        "model_name": "xgboost_model", "division": "Light Heavyweight",
+        "red_fighter_id": jones, "blue_fighter_id": cormier,
+        "rounds_scheduled": rounds_scheduled,
+    })
+    assert resp.status_code == 200
+    assert resp.json()["rounds_scheduled"] == rounds_scheduled
+
+
+@pytest.mark.parametrize("rounds_scheduled", [0, 1, 2, 4, 6, -3])
+def test_predict_rejects_rounds_scheduled_outside_3_or_5(client, rounds_scheduled):
+    jones = _fighter_id(client, "Light Heavyweight", "Jon Jones")
+    cormier = _fighter_id(client, "Light Heavyweight", "Daniel Cormier")
+
+    resp = client.post("/predict", json={
+        "model_name": "xgboost_model", "division": "Light Heavyweight",
+        "red_fighter_id": jones, "blue_fighter_id": cormier,
+        "rounds_scheduled": rounds_scheduled,
+    })
+    assert resp.status_code == 422
+
+
+def test_predict_rounds_scheduled_actually_feeds_the_round_model_not_just_the_echoed_label(client, monkeypatch):
+    # Spy on _predict_multiclass to capture the static_features it's
+    # actually called with for the top-level (non-past-meeting) round
+    # prediction - the first "<model>_round" call made per request, since
+    # predict() makes it before it ever loops over past_meetings (whose own
+    # calls use a REAL historical rounds_scheduled, unrelated to the
+    # request's). A fixed/ignored default would show the same captured
+    # value regardless of what the request asked for.
+    jones = _fighter_id(client, "Light Heavyweight", "Jon Jones")
+    cormier = _fighter_id(client, "Light Heavyweight", "Daniel Cormier")
+    original = api_main._predict_multiclass
+
+    def _capture_first_round_call(rounds_scheduled):
+        captured = []
+
+        def _spy(artifact_key, *args, static_features=None, **kwargs):
+            if artifact_key.endswith("_round") and not captured:
+                captured.append(static_features["rounds_scheduled"])
+            return original(artifact_key, *args, static_features=static_features, **kwargs)
+
+        monkeypatch.setattr(api_main, "_predict_multiclass", _spy)
+        resp = client.post("/predict", json={
+            "model_name": "xgboost_model", "division": "Light Heavyweight",
+            "red_fighter_id": jones, "blue_fighter_id": cormier,
+            "rounds_scheduled": rounds_scheduled,
+        })
+        assert resp.status_code == 200
+        return captured[0]
+
+    assert _capture_first_round_call(3) == 3.0
+    assert _capture_first_round_call(5) == 5.0

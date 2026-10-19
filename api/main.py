@@ -5,7 +5,7 @@ from typing import Optional
 import numpy as np
 import pandas as pd
 from fastapi import FastAPI, HTTPException
-from pydantic import BaseModel
+from pydantic import BaseModel, field_validator
 
 from src.data.cleaning import clean_fights
 from src.data.ingestion import build_master_equivalent, load_fighters, load_fights
@@ -171,6 +171,20 @@ class PredictRequest(BaseModel):
     red_year: Optional[int] = None
     blue_fighter_id: str
     blue_year: Optional[int] = None
+    # This matchup is hypothetical, so there's no real fight row to read a
+    # scheduled round count off of (unlike a past meeting, which has its
+    # own real time_format - see rounds_scheduled below) - the frontend's
+    # 3/5-round toggle is the only source for it. Only ever 3 or 5 (see the
+    # validator): those are the only scheduled lengths that exist in the
+    # UFC (5 for title/main-event fights, 3 for everything else).
+    rounds_scheduled: int = 3
+
+    @field_validator("rounds_scheduled")
+    @classmethod
+    def _rounds_scheduled_must_be_3_or_5(cls, value):
+        if value not in (3, 5):
+            raise ValueError("rounds_scheduled must be 3 or 5")
+        return value
 
 
 def _predict(model_name, division, red_fighter_id, red_cutoff, blue_fighter_id, blue_cutoff,
@@ -271,6 +285,19 @@ def predict(req: PredictRequest):
         red_win_probability = _predict(req.model_name, req.division, req.red_fighter_id, red_cutoff,
                                         req.blue_fighter_id, blue_cutoff, fights, fighters_df)
 
+        # This matchup is hypothetical (no real fight row to read a
+        # scheduled round count off of, unlike a past meeting below) - the
+        # caller's own rounds_scheduled (the frontend's 3/5-round toggle,
+        # validated to one of those two values on PredictRequest) decides
+        # it, never a guessed/fixed default.
+        predicted_round = _predict_multiclass(
+            f"{req.model_name}_round", req.division, req.red_fighter_id, red_cutoff,
+            req.blue_fighter_id, blue_cutoff, fights, fighters_df,
+            static_features={"rounds_scheduled": float(req.rounds_scheduled)})
+        predicted_method = _predict_multiclass(
+            f"{req.model_name}_method", req.division, req.red_fighter_id, red_cutoff,
+            req.blue_fighter_id, blue_cutoff, fights, fighters_df)
+
         red_display = build_display_stats(fights, fights_with_features, fighters_df,
                                            req.red_fighter_id, red_cutoff, req.division)
         blue_display = build_display_stats(fights, fights_with_features, fighters_df,
@@ -368,6 +395,9 @@ def predict(req: PredictRequest):
         "red_win_probability": red_win_probability,
         "blue_win_probability": 1 - red_win_probability,
         "predicted_winner": "red" if red_win_probability >= 0.5 else "blue",
+        "rounds_scheduled": req.rounds_scheduled,
+        "predicted_round": predicted_round,
+        "predicted_method": _METHOD_DISPLAY.get(predicted_method, predicted_method),
         "red_stats": red_display,
         "blue_stats": blue_display,
         "past_meetings": history,

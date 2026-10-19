@@ -163,6 +163,21 @@ def test_build_matchup_features_fills_missing_with_zero():
     assert feats["prior_win_rate_diff"] == 0.0
 
 
+def test_build_matchup_features_static_features_passes_rounds_scheduled_through_unchanged():
+    # rounds_scheduled (the frontend's 3/5-round fight-format toggle, via
+    # api.main.predict's static_features) is a fight-level fact neither
+    # snapshot can supply - it must be used verbatim, not zeroed/imputed
+    # like every other missing feature, and a different caller-given value
+    # must actually produce a different feature, not a fixed constant.
+    red, blue = {"age": 30.0}, {"age": 28.0}
+    feats_3 = build_matchup_features(red, blue, "Heavyweight", ["rounds_scheduled"],
+                                      static_features={"rounds_scheduled": 3.0})
+    feats_5 = build_matchup_features(red, blue, "Heavyweight", ["rounds_scheduled"],
+                                      static_features={"rounds_scheduled": 5.0})
+    assert feats_3["rounds_scheduled"] == 3.0
+    assert feats_5["rounds_scheduled"] == 5.0
+
+
 def test_build_matchup_features_self_opp_reads_own_vs_other_corner():
     red = {"age": 30.0, "prior_fights": 5}
     blue = {"age": 28.0, "prior_fights": 2}

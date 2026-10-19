@@ -19,6 +19,16 @@ from frontend import images
 API_URL = os.environ.get("UFC_ELO_API_URL", "http://127.0.0.1:8000")
 NO_YEAR_CHOICE = "Most recent (full history)"
 
+# Fight format toggle: a non-title fight is scheduled for 3 rounds, a title
+# (or 5-round main event) fight for 5 - those are the only two lengths that
+# exist in the UFC, and api.main.PredictRequest.rounds_scheduled validates
+# against exactly these two ints. The frontend has no other source for
+# this (it isn't derivable from either fighter's own history), so this
+# toggle is the only way a caller can ask for the 5-round prediction.
+THREE_ROUNDS_CHOICE = "3 Rounds"
+FIVE_ROUNDS_CHOICE = "5 Rounds (Title Fight)"
+_ROUNDS_SCHEDULED_BY_CHOICE = {THREE_ROUNDS_CHOICE: 3, FIVE_ROUNDS_CHOICE: 5}
+
 # Upper weight limit per division - the UFC's own numbers (not model data,
 # so they live here rather than in src/features/engineering.py). kg values
 # are the UFC's own published international limits, not a lbs*0.4536
@@ -415,10 +425,10 @@ def _format_meeting(meeting, red_name, blue_name):
         )
     else:
         predicted_name = names[predicted["predicted_winner"]]
+        agree_suffix = ""
         if decisive:
             agree = "✅ model agreed" if predicted["predicted_winner"] == actual["winner"] else "❌ model disagreed"
-        else:
-            agree = "model predicts a red/blue winner only - it doesn't predict draws/no-contests"
+            agree_suffix = f" - {agree}"
         predicted_round = predicted.get("predicted_round")
         predicted_method = predicted.get("predicted_method")
         # Two trailing spaces before the \n: CommonMark's hard-line-break
@@ -428,7 +438,7 @@ def _format_meeting(meeting, red_name, blue_name):
         prediction_line = (
             f"Predicted: **{predicted_name}** to win "
             f"({predicted['red_win_probability'] * 100:.1f}% red / "
-            f"{predicted['blue_win_probability'] * 100:.1f}% blue) - {agree}  \n"
+            f"{predicted['blue_win_probability'] * 100:.1f}% blue){agree_suffix}  \n"
             f"Predicted round: {predicted_round if predicted_round is not None else 'Unavailable'} | "
             f"Predicted method: {predicted_method if predicted_method is not None else 'Unavailable'}\n\n"
         )
@@ -452,7 +462,8 @@ def _format_meeting(meeting, red_name, blue_name):
     )
 
 
-def predict(model_name, division, red_fighter_id, red_year, blue_fighter_id, blue_year, unit="lbs"):
+def predict(model_name, division, red_fighter_id, red_year, blue_fighter_id, blue_year,
+            fight_format=THREE_ROUNDS_CHOICE, unit="lbs"):
     if not red_fighter_id or not blue_fighter_id:
         return "Pick both a red and a blue corner fighter first.", "", "", None
 
@@ -482,6 +493,11 @@ def predict(model_name, division, red_fighter_id, red_year, blue_fighter_id, blu
         "red_year": None if red_year in (None, NO_YEAR_CHOICE) else int(red_year),
         "blue_fighter_id": blue_fighter_id,
         "blue_year": None if blue_year in (None, NO_YEAR_CHOICE) else int(blue_year),
+        # Defaults to 3 (the far more common format) for anything that
+        # isn't one of the Radio's own two choices - a stale/invalid value
+        # should never block a prediction, same spirit as the fighter-id
+        # validity check above.
+        "rounds_scheduled": _ROUNDS_SCHEDULED_BY_CHOICE.get(fight_format, 3),
     }
     try:
         resp = requests.post(f"{API_URL}/predict", json=payload, timeout=60)
@@ -496,8 +512,15 @@ def predict(model_name, division, red_fighter_id, red_year, blue_fighter_id, blu
     except ValueError:
         return "Error: the prediction API returned a response that wasn't valid JSON.", "", "", None
     winner_name = red_name if data["predicted_winner"] == "red" else blue_name
+    predicted_round = data.get("predicted_round")
+    predicted_method = data.get("predicted_method")
+    rounds_scheduled = data.get("rounds_scheduled")
+    format_suffix = f" ({rounds_scheduled}-round fight)" if rounds_scheduled is not None else ""
     headline = (
         f"## Predicted winner: {winner_name}\n"
+        f"Predicted round: {predicted_round if predicted_round is not None else 'Unavailable'} | "
+        f"Predicted method: {predicted_method if predicted_method is not None else 'Unavailable'}"
+        f"{format_suffix}\n\n"
         f"{red_name} win probability: **{data['red_win_probability'] * 100:.1f}%** "
         f"(Most recent fight: {data['red_snapshot_date']})\n\n"
         f"{blue_name} win probability: **{data['blue_win_probability'] * 100:.1f}%** "
@@ -574,6 +597,13 @@ with gr.Blocks(title="UFC Matchup Predictor", css=TALE_OF_THE_TAPE_CSS) as demo:
     model_dropdown = gr.Dropdown(label="Model", choices=[], filterable=True, allow_custom_value=True)
     division_dropdown = gr.Dropdown(label="Weight Division", choices=[], filterable=True,
                                      allow_custom_value=True)
+    # Fixed two-choice Radio (no allow_custom_value - unlike the dropdowns
+    # above, its choices are static from the start, so there's no
+    # before-on_load() window where they'd be empty) - feeds
+    # rounds_scheduled, which changes the round/method prediction itself
+    # (see predict()), not just a display label.
+    fight_format_radio = gr.Radio(label="Fight Format", choices=[THREE_ROUNDS_CHOICE, FIVE_ROUNDS_CHOICE],
+                                   value=THREE_ROUNDS_CHOICE)
 
     with gr.Row():
         with gr.Column():
@@ -662,7 +692,8 @@ with gr.Blocks(title="UFC Matchup Predictor", css=TALE_OF_THE_TAPE_CSS) as demo:
 
     predict_button.click(
         predict,
-        inputs=[model_dropdown, division_dropdown, red_fighter, red_year, blue_fighter, blue_year, unit_state],
+        inputs=[model_dropdown, division_dropdown, red_fighter, red_year, blue_fighter, blue_year,
+                fight_format_radio, unit_state],
         outputs=[result_headline, tale_of_the_tape_panel, rematch_history, last_result_state],
     )
 

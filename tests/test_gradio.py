@@ -229,7 +229,6 @@ def test_format_meeting_retains_predicted_winner_for_a_no_contest():
     # never a fabricated agree/disagree against a non-existent winner.
     assert "model agreed" not in text
     assert "model disagreed" not in text
-    assert "doesn't predict draws/no-contests" in text
     # the actual result is a no-contest, not a forced Red/Blue winner.
     assert "**No Contest**" in text
     assert "Overturned" in text
@@ -628,3 +627,121 @@ def test_predict_surfaces_json_detail_from_a_400_response(monkeypatch):
 
     headline, *_rest = fg.predict("m1", "Lightweight", "r1", None, "b1", None)
     assert headline == "Error: fighter r1 has no fight history"
+
+
+def test_predict_headline_shows_predicted_round_and_method_for_an_upcoming_fight(monkeypatch):
+    # Not a past meeting - an upcoming/hypothetical matchup. The headline
+    # built from /predict's own top-level response (not a past_meetings
+    # entry) must show the predicted round/method too, right under the
+    # predicted winner, the same way a past meeting already does.
+    monkeypatch.setattr(fg, "_fighter_choices", lambda division: ([], _FIGHTERS))
+    monkeypatch.setattr(requests, "post", lambda *a, **k: _FakeResponse(
+        status_code=200, json_data={
+            "red_win_probability": 0.7, "blue_win_probability": 0.3, "predicted_winner": "red",
+            "predicted_round": 3, "predicted_method": "Decision",
+            "red_snapshot_date": "2021-01-01", "blue_snapshot_date": "2021-06-01",
+            "red_stats": _make_stats(prior_fights=10, prior_wins=8),
+            "blue_stats": _make_stats(prior_fights=10, prior_wins=6),
+            "past_meetings": [],
+        }))
+
+    headline, _tape, history, _last_result = fg.predict("m1", "Lightweight", "r1", None, "b1", None)
+    assert "Predicted winner: Red Fighter" in headline
+    assert "Predicted round: 3" in headline
+    assert "Predicted method: Decision" in headline
+    assert history == "These two fighters have no completed fight on record against each other."
+
+
+def test_predict_headline_shows_unavailable_when_round_and_method_are_missing(monkeypatch):
+    # Mirrors _format_meeting's own "Unavailable" fallback (never a guessed
+    # value) for an older API/model artifact that doesn't yet return these.
+    monkeypatch.setattr(fg, "_fighter_choices", lambda division: ([], _FIGHTERS))
+    monkeypatch.setattr(requests, "post", lambda *a, **k: _FakeResponse(
+        status_code=200, json_data={
+            "red_win_probability": 0.7, "blue_win_probability": 0.3, "predicted_winner": "red",
+            "predicted_round": None, "predicted_method": None,
+            "red_snapshot_date": "2021-01-01", "blue_snapshot_date": "2021-06-01",
+            "red_stats": _make_stats(prior_fights=10, prior_wins=8),
+            "blue_stats": _make_stats(prior_fights=10, prior_wins=6),
+            "past_meetings": [],
+        }))
+
+    headline, *_rest = fg.predict("m1", "Lightweight", "r1", None, "b1", None)
+    assert "Predicted round: Unavailable" in headline
+    assert "Predicted method: Unavailable" in headline
+
+
+# ---------------------------------------------------------------------------
+# Fight Format toggle (3 vs. 5 rounds, see THREE_ROUNDS_CHOICE/
+# FIVE_ROUNDS_CHOICE and fight_format_radio) - must actually change the
+# rounds_scheduled the frontend sends to the API, not just the button's own
+# label, and must display whatever format the API says it actually used.
+# ---------------------------------------------------------------------------
+
+def test_predict_sends_rounds_scheduled_3_for_the_default_three_rounds_choice(monkeypatch):
+    captured = {}
+
+    def _capture_post(url, json=None, **kwargs):
+        captured.update(json)
+        return _FakeResponse(status_code=200, json_data={
+            "red_win_probability": 0.6, "blue_win_probability": 0.4, "predicted_winner": "red",
+            "predicted_round": 3, "predicted_method": "Decision", "rounds_scheduled": 3,
+            "red_snapshot_date": "2021-01-01", "blue_snapshot_date": "2021-06-01",
+            "red_stats": _make_stats(prior_fights=10, prior_wins=8),
+            "blue_stats": _make_stats(prior_fights=10, prior_wins=6),
+            "past_meetings": [],
+        })
+
+    monkeypatch.setattr(fg, "_fighter_choices", lambda division: ([], _FIGHTERS))
+    monkeypatch.setattr(requests, "post", _capture_post)
+
+    fg.predict("m1", "Lightweight", "r1", None, "b1", None, fg.THREE_ROUNDS_CHOICE)
+    assert captured["rounds_scheduled"] == 3
+
+
+def test_predict_sends_rounds_scheduled_5_for_the_five_rounds_choice(monkeypatch):
+    captured = {}
+
+    def _capture_post(url, json=None, **kwargs):
+        captured.update(json)
+        return _FakeResponse(status_code=200, json_data={
+            "red_win_probability": 0.6, "blue_win_probability": 0.4, "predicted_winner": "red",
+            "predicted_round": 4, "predicted_method": "Decision", "rounds_scheduled": 5,
+            "red_snapshot_date": "2021-01-01", "blue_snapshot_date": "2021-06-01",
+            "red_stats": _make_stats(prior_fights=10, prior_wins=8),
+            "blue_stats": _make_stats(prior_fights=10, prior_wins=6),
+            "past_meetings": [],
+        })
+
+    monkeypatch.setattr(fg, "_fighter_choices", lambda division: ([], _FIGHTERS))
+    monkeypatch.setattr(requests, "post", _capture_post)
+
+    headline, *_rest = fg.predict("m1", "Lightweight", "r1", None, "b1", None, fg.FIVE_ROUNDS_CHOICE)
+    assert captured["rounds_scheduled"] == 5
+    # the headline reflects what the API says it actually used, not just
+    # what was requested - see predict()'s rounds_scheduled/format_suffix.
+    assert "5-round fight" in headline
+
+
+def test_predict_defaults_to_3_rounds_for_an_invalid_fight_format_value(monkeypatch):
+    # fight_format_radio has no allow_custom_value, so this shouldn't reach
+    # predict() in the live app - but a stale/direct call must still fail
+    # safe to the far more common format rather than crashing on a KeyError.
+    captured = {}
+
+    def _capture_post(url, json=None, **kwargs):
+        captured.update(json)
+        return _FakeResponse(status_code=200, json_data={
+            "red_win_probability": 0.6, "blue_win_probability": 0.4, "predicted_winner": "red",
+            "predicted_round": 3, "predicted_method": "Decision", "rounds_scheduled": 3,
+            "red_snapshot_date": "2021-01-01", "blue_snapshot_date": "2021-06-01",
+            "red_stats": _make_stats(prior_fights=10, prior_wins=8),
+            "blue_stats": _make_stats(prior_fights=10, prior_wins=6),
+            "past_meetings": [],
+        })
+
+    monkeypatch.setattr(fg, "_fighter_choices", lambda division: ([], _FIGHTERS))
+    monkeypatch.setattr(requests, "post", _capture_post)
+
+    fg.predict("m1", "Lightweight", "r1", None, "b1", None, "garbage")
+    assert captured["rounds_scheduled"] == 3
