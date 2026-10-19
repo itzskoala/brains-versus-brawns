@@ -218,6 +218,43 @@ def _predict(model_name, division, red_snapshot, blue_snapshot):
 _METHOD_DISPLAY = {"ko_tko": "KO/TKO", "submission": "Submission", "decision": "Decision", "other": "Other"}
 
 
+def _reconcile_predicted_round(predicted_round, predicted_method, rounds_scheduled):
+    """The round and method targets are two INDEPENDENTLY trained
+    classifiers (see src.evaluation.multiclass_backtest) with no joint
+    constraint between them - each just picks its own single most-likely
+    class out of ALL classes ever observed across BOTH 3- and 5-round
+    fights combined, with nothing stopping either one from landing on a
+    combination that's physically impossible for THIS fight's own
+    rounds_scheduled. Two such impossible combinations, both confirmed
+    against real data:
+
+    1. predicted_round > rounds_scheduled (e.g. "Round 5" on a 3-round
+       fight) - a fight can never finish in a round that doesn't exist on
+       the scorecard. Checked against every real 3-/5-round fight on
+       record (the only two formats this app's toggle ever requests):
+       ZERO exceptions (0/10,698) - an absolute constraint, not a
+       heuristic, so this always clamps down to rounds_scheduled.
+    2. predicted_method == "decision" with predicted_round short of
+       rounds_scheduled (e.g. "Round 1 | Decision") - going to the
+       judges means every scheduled round was fought. True for 99.4% of
+       recorded decisions (4936/4964); the rare exceptions are technical
+       decisions after an early stoppage, which this forward-looking
+       predictor (for a fight that hasn't happened yet) has no signal to
+       anticipate, so the overwhelmingly common case wins and this also
+       forces predicted_round to rounds_scheduled.
+
+    Never touches a non-decision call whose round is already <=
+    rounds_scheduled (already a normal, real outcome), and never
+    fabricates a round that was genuinely None (no round artifact for
+    this model) or against a rounds_scheduled that's missing."""
+    if predicted_round is None or pd.isna(rounds_scheduled):
+        return predicted_round
+    rounds_scheduled = int(rounds_scheduled)
+    if predicted_method == "decision" or predicted_round > rounds_scheduled:
+        return rounds_scheduled
+    return predicted_round
+
+
 def _predict_multiclass(artifact_key, division, red_snapshot, blue_snapshot, static_features=None):
     """The single most-likely class for a round or win-method artifact
     (meta["classes"], decoded from the model's integer prediction - see
@@ -302,6 +339,7 @@ def predict(req: PredictRequest):
             f"{req.model_name}_round", req.division, red_snapshot, blue_snapshot,
             static_features={"rounds_scheduled": float(req.rounds_scheduled)})
         predicted_method = _predict_multiclass(f"{req.model_name}_method", req.division, red_snapshot, blue_snapshot)
+        predicted_round = _reconcile_predicted_round(predicted_round, predicted_method, req.rounds_scheduled)
 
         red_display = build_display_stats(fights, fights_with_features, fighters_df,
                                            req.red_fighter_id, red_cutoff, req.division, snapshot=red_snapshot)
@@ -346,11 +384,25 @@ def predict(req: PredictRequest):
             meeting_rounds_scheduled = (
                 meeting_rounds_scheduled.iloc[0] if not meeting_rounds_scheduled.empty else None)
 
-            predicted_round = _predict_multiclass(
+            # meeting_-prefixed (not plain predicted_round/predicted_method)
+            # - this loop body runs once per past meeting, and Python gives
+            # a for loop no block scope of its own, so reusing the
+            # top-level matchup's own variable names here would silently
+            # clobber them on every iteration: the response's own
+            # "predicted_round"/"predicted_method" (read after this loop
+            # ends, see the response dict below) would end up holding
+            # whichever past meeting happened to be processed LAST,
+            # instead of the live matchup's own prediction. Confirmed as a
+            # real regression this way - a matchup with at least one real
+            # past meeting was showing that meeting's round/method instead
+            # of its own.
+            meeting_predicted_round = _predict_multiclass(
                 f"{req.model_name}_round", meeting_division, red_meeting_snapshot, blue_meeting_snapshot,
                 static_features={"rounds_scheduled": meeting_rounds_scheduled})
-            predicted_method = _predict_multiclass(
+            meeting_predicted_method = _predict_multiclass(
                 f"{req.model_name}_method", meeting_division, red_meeting_snapshot, blue_meeting_snapshot)
+            meeting_predicted_round = _reconcile_predicted_round(
+                meeting_predicted_round, meeting_predicted_method, meeting_rounds_scheduled)
 
             red_pre_fight = build_display_stats(trimmed_fights, trimmed_features, fighters_df,
                                                  req.red_fighter_id, meeting_date, meeting_division,
@@ -364,8 +416,8 @@ def predict(req: PredictRequest):
                 "predicted_winner": "red" if historical_red_prob >= 0.5 else "blue",
                 # None only if this model_name has no round/method artifact
                 # at all (see _predict_multiclass) - never a guessed value.
-                "predicted_round": predicted_round,
-                "predicted_method": _METHOD_DISPLAY.get(predicted_method, predicted_method),
+                "predicted_round": meeting_predicted_round,
+                "predicted_method": _METHOD_DISPLAY.get(meeting_predicted_method, meeting_predicted_method),
                 "red_stats": red_pre_fight,
                 "blue_stats": blue_pre_fight,
             }

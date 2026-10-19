@@ -585,3 +585,122 @@ def test_predict_excludes_a_fight_the_requested_year_cutoff_precedes(client, mon
     data = resp.json()
     assert data["red_snapshot_date"] != new_fight_date.date().isoformat()
     assert pd.Timestamp(data["red_snapshot_date"]).year == pre_cutoff_year
+
+
+# ---------------------------------------------------------------------------
+# _reconcile_predicted_round: the round and method targets are two
+# independently trained classifiers (see src.evaluation.multiclass_backtest)
+# with no joint constraint between them, so without this, real responses
+# have shown impossible combinations like "Round 5" on a 3-round fight, and
+# "Round 1 | Decision" (going to the judges means every scheduled round was
+# fought).
+# ---------------------------------------------------------------------------
+
+def test_reconcile_predicted_round_clamps_a_round_past_the_scheduled_length():
+    assert api_main._reconcile_predicted_round(5, "ko_tko", 3) == 3
+
+
+def test_reconcile_predicted_round_forces_scheduled_length_on_a_decision():
+    assert api_main._reconcile_predicted_round(1, "decision", 5) == 5
+
+
+def test_reconcile_predicted_round_leaves_a_valid_non_decision_round_untouched():
+    assert api_main._reconcile_predicted_round(2, "ko_tko", 3) == 2
+
+
+def test_reconcile_predicted_round_never_fabricates_a_round_that_was_genuinely_none():
+    assert api_main._reconcile_predicted_round(None, "decision", 3) is None
+
+
+def test_reconcile_predicted_round_leaves_round_untouched_when_rounds_scheduled_is_missing():
+    assert api_main._reconcile_predicted_round(5, "ko_tko", None) == 5
+    assert api_main._reconcile_predicted_round(5, "ko_tko", float("nan")) == 5
+
+
+def test_predict_response_never_shows_a_round_past_its_own_scheduled_length(client, monkeypatch):
+    # Regression for a real reported response: "Predicted round: 5 |
+    # Predicted method: KO/TKO (3-round fight)" - impossible, since a
+    # 3-round fight has no round 4 or 5 to finish in. Forces the round
+    # target to return an out-of-range class and confirms the final
+    # response clamps it rather than passing it through.
+    jones = _fighter_id(client, "Light Heavyweight", "Jon Jones")
+    cormier = _fighter_id(client, "Light Heavyweight", "Daniel Cormier")
+    original = api_main._predict_multiclass
+
+    def _force_round_5(artifact_key, *args, **kwargs):
+        if artifact_key.endswith("_round"):
+            return 5
+        return original(artifact_key, *args, **kwargs)
+
+    monkeypatch.setattr(api_main, "_predict_multiclass", _force_round_5)
+    resp = client.post("/predict", json={
+        "model_name": "xgboost_model", "division": "Light Heavyweight",
+        "red_fighter_id": jones, "blue_fighter_id": cormier, "rounds_scheduled": 3,
+    })
+    assert resp.status_code == 200
+    assert resp.json()["predicted_round"] == 3
+
+
+def test_predict_response_never_pairs_decision_with_a_round_before_the_scheduled_length(client, monkeypatch):
+    # Regression for a real reported response: "Predicted round: 1 |
+    # Predicted method: Decision" - impossible, since going to the judges
+    # means every scheduled round was fought.
+    jones = _fighter_id(client, "Light Heavyweight", "Jon Jones")
+    cormier = _fighter_id(client, "Light Heavyweight", "Daniel Cormier")
+    original = api_main._predict_multiclass
+
+    def _force_round_1_and_decision(artifact_key, *args, **kwargs):
+        if artifact_key.endswith("_round"):
+            return 1
+        if artifact_key.endswith("_method"):
+            return "decision"
+        return original(artifact_key, *args, **kwargs)
+
+    monkeypatch.setattr(api_main, "_predict_multiclass", _force_round_1_and_decision)
+    resp = client.post("/predict", json={
+        "model_name": "xgboost_model", "division": "Light Heavyweight",
+        "red_fighter_id": jones, "blue_fighter_id": cormier, "rounds_scheduled": 5,
+    })
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["predicted_method"] == "Decision"
+    assert data["predicted_round"] == 5
+
+
+def test_predict_past_meetings_also_never_show_an_impossible_round_method_pairing(client, monkeypatch):
+    # Same reconciliation, applied inside the past_meetings loop (each
+    # meeting has its own real historical rounds_scheduled, not the live
+    # matchup's) - see api.main.predict's per-meeting
+    # _reconcile_predicted_round call.
+    jones = _fighter_id(client, "Light Heavyweight", "Jon Jones")
+    cormier = _fighter_id(client, "Light Heavyweight", "Daniel Cormier")
+    original = api_main._predict_multiclass
+
+    def _force_round_1_and_decision(artifact_key, *args, **kwargs):
+        if artifact_key.endswith("_round"):
+            return 1
+        if artifact_key.endswith("_method"):
+            return "decision"
+        return original(artifact_key, *args, **kwargs)
+
+    monkeypatch.setattr(api_main, "_predict_multiclass", _force_round_1_and_decision)
+    resp = client.post("/predict", json={
+        "model_name": "xgboost_model", "division": "Light Heavyweight",
+        "red_fighter_id": jones, "blue_fighter_id": cormier,
+    })
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["past_meetings"], "needs a real rivalry with past meetings to prove anything"
+
+    checked_any = False
+    for meeting in data["past_meetings"]:
+        predicted = meeting["predicted"]
+        if predicted is None:
+            continue
+        checked_any = True
+        assert predicted["predicted_method"] == "Decision"
+        # Jones/Cormier's real meetings (UFC 182, UFC 214) were both
+        # 5-round title fights - forcing "Round 1" must come back as
+        # "Round 5" here too, the same reconciliation as the live matchup.
+        assert predicted["predicted_round"] == 5
+    assert checked_any
