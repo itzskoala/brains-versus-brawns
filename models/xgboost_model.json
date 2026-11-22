@@ -321,10 +321,10 @@
     "learning_rate": 0.1
   },
   "metrics": {
-    "mean_accuracy": 0.6346,
-    "mean_log_loss": 0.6326,
-    "mean_roc_auc": 0.6852,
+    "mean_accuracy": 0.6353,
+    "mean_log_loss": 0.6322,
+    "mean_roc_auc": 0.6862,
     "source": "walk-forward run_backtest, combined(115) feature set, median+indicator imputer, 2026-10-10, hyperparameters preserved from prior artifact"
   },
-  "saved_at": "2026-11-15T19:05:47.773293+00:00"
+  "saved_at": "2026-11-22T19:58:07.970636+00:00"
 }
